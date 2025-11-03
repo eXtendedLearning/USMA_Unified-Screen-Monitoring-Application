@@ -1,48 +1,67 @@
-# USMA (Unified Screen Monitoring Application) - v.0.3.10 Project Overview
+# USMA (Unified Screen Monitoring Application) - v.0.4.1
 
-## 1. Project Goal
-The primary goal of USMA is to provide a user-friendly graphical tool to monitor user-defined regions on a computer screen. It is specifically designed to analyze line graphs within these regions, extracting the 1D signal, and classifying its frequency content as either High Frequency (HF) or Low Frequency (LF).
+[cite_start]This application provides a GUI for real-time screen monitoring, color analysis, and Optical Character Recognition (OCR) for specialized data logging. [cite: 1, 2]
 
-The application is built for tasks requiring real-time visual feedback on data volatility and has been enhanced to **export physically scaled engineering data** for professional post-processing and analysis.
+---
 
-## 2. What's New (v.0.3.10)
-This release marks a significant step towards professional engineering use cases by introducing physical unit scaling and industry-standard data logging formats.
+## Version History
 
-### Key Features
-* **Physical Unit Scaling:** Users can now map the pixel dimensions of a monitoring region to real-world physical units. This includes defining the min/max values for the X-axis (e.g., in Hz) and Y-axis (e.g., in g/N, Pa, etc.).
-* **Professional Data Logging:** Signal data can now be saved in formats ready for engineering analysis software:
-    * **.mat files:** Logged with properly scaled frequency (Hz) and amplitude axes.
-    * **.unv files:** Exported as Universal File Format (UFF) Type 58 datasets, fully compliant with industry standards for direct import into analysis software like Siemens Testlab.
-* **Expanded Configuration Tool:** The configuration GUI has been updated with new input fields to easily manage physical scaling parameters and metadata for `.unv` headers (e.g., node and DOF information).
-* **Real-time Audio Feedback:** Provides a continuous 400 Hz tone for the entire duration that a signal is classified as High Frequency (HF), offering immediate and intuitive status awareness. This feature can be toggled from the main GUI.
-* **Adjustable Sample Frequency:** The main GUI includes a control to set the monitoring sample rate in Hz (defaulting to 4 Hz), allowing users to balance performance and analysis granularity.
+### [cite_start]v.0.4.1 (Current Release) [cite: 4]
 
-## 3. Core Components of monitor_app.py
-The application is architecturally divided into a GUI layer and a backend analysis engine that run on separate threads to maintain a responsive user interface.
+* [cite_start]**Portability & Installation Wizard:** Removed the hardcoded path to `tesseract.exe` from `monitor_app.py`. [cite: 6] [cite_start]The app now correctly finds Tesseract from the system's `PATH`. [cite: 6]
+* [cite_start]`RUN_monitor.bat` is now an installation "wizard" that automatically checks for Python, Tesseract, and installs all required Python packages in a virtual environment. [cite: 7]
 
-### a. Main GUI (MonitorControlGUI)
-**Functionality:** The central control window for loading configurations, starting/stopping the monitor, viewing live classification and FFT metrics, and toggling detailed logging options, including the new **.mat and .unv data export**.
+### [cite_start]v.0.4.0 [cite: 8]
 
-### b. Configuration Tool (ConfigToolWindow & HSVThresholderWindow)
-**Functionality:** A powerful sub-application for setting up monitoring tasks. Its capabilities now include region definition, color calibration, tuning of FFT analysis parameters, and **configuring physical axis scaling and UNV metadata**.
+* [cite_start]**OCR Integration:** Added Optical Character Recognition (OCR) using `pytesseract` to extract text from designated screen regions. [cite: 9]
+* [cite_start]**New Region Types:** Added status, overload, and points region types for OCR. [cite: 10]
+* [cite_start]**Enhanced Logging:** OCR data is now embedded in logs, image titles, and data files. [cite: 11]
+* [cite_start]**Standard-Compliant UNV Headers:** Added UFF Type 18 (Overload status) and mapped points to UFF Type 58 (Node/DOF IDs). [cite: 12]
+* [cite_start]**Dynamic Filenaming:** Log files are now named using parsed points info (e.g., `FRF_P1P3_1.mot`). [cite: 13]
+* [cite_start]**Manual POI Entry:** Added a GUI option for manual entry of Hammer/Response points. [cite: 14]
 
-### c. Analysis Engine (ScreenMonitor)
-**Functionality:** The core backend logic that runs on a background thread. It handles screen capture, signal analysis, and logging. It now applies the user-defined physical scaling when exporting data files.
+---
 
-## 4. Key Algorithm: Signal Reconstruction & FFT Classification
+## Requirements
 
-### a. Signal Reconstruction (Mathematical Model)
-This algorithm converts the 2D pixel data of a graph into a 1D signal vector (unit: pixels) using a robust four-step process: Color Filtering, Coordinate Extraction, Anchor Point Generation, and Linear Interpolation. This pixel-based vector serves as the foundation for both real-time classification and the final scaled data export.
+[cite_start]You must have these two programs installed before running the application: [cite: 16]
 
-### b. Frequency Analysis: High-Frequency Energy Ratio
-This model quantifies the signal's nature by calculating the percentage of its total "energy" contained within the high-frequency part of its spectrum. This "energy" is a signal processing term (unit: pixels²) and is not physical energy.
+1.  [cite_start]**Python 3.x:** [cite: 17]
+    * [cite_start]Download and install from python.org. [cite: 18]
+    * [cite_start]**IMPORTANT:** During installation, make sure to check the box that says "Add Python to PATH". [cite: 19]
 
-* **Signal Detrending:** The signal's mean is subtracted to remove the DC component.
-* **Fast Fourier Transform (FFT):** `scipy.fft.rfft` is applied to transform the signal into the frequency domain.
-* **Energy Calculation:**
-    * A user-defined Cutoff Frequency divides the spectrum into "low" and "high" bands.
-    * The total energy ($E_{total}$) and high-frequency energy ($E_{high}$) are calculated from the squared magnitudes of the spectrum.
-* **Ratio and Classification:**
-    * The dimensionless energy ratio is computed: $R = E_{high} / E_{total}$.
-    * This ratio R is compared against a user-defined Energy Ratio Threshold.
-    * If R is greater than the threshold, the signal is classified as HF; otherwise, it is LF.
+2.  [cite_start]**Tesseract-OCR Engine:** [cite: 20]
+    * [cite_start]This is an external program required for all OCR features (reading text from the screen). [cite: 22]
+    * [cite_start]Download the installer from here: [https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki) [cite: 23]
+    * [cite_start]**IMPORTANT:** During installation, you MUST check the box to "Add Tesseract to system PATH" (it might be under "Additional language data" or a similar component). [cite: 24]
+    * [cite_start]If you do not do this, the application will not be able to find it. [cite: 25]
+
+---
+
+## How to Run
+
+1.  [cite_start]Download all files from this repository (or clone it). [cite: 27]
+2.  [cite_start]Double-click the `RUN_monitor.bat` file. [cite: 28]
+    * [cite_start]This batch file is a "wizard" that will automatically: [cite: 29]
+        * [cite_start]Check if Python is installed. [cite: 30]
+        * [cite_start]Check if Tesseract-OCR is installed and in your `PATH`. [cite: 31]
+* [cite_start]Create a local Python virtual environment (in a folder named `sm_venv`). [cite: 32]
+        * [cite_start]Install all required Python libraries (like `opencv`, `pytesseract`, `sounddevice`, etc.) into that environment. [cite: 33]
+        * [cite_start]Launch the main application (`monitor_app.py`). [cite: 34]
+
+---
+
+## Troubleshooting
+
+### [cite_start]"ERROR: Tesseract-OCR not found in PATH..." [cite: 36]
+
+[cite_start]You did not install Tesseract correctly. [cite: 36]
+
+1.  [cite_start]Re-run the Tesseract installer (from the link above). [cite: 37]
+2.  [cite_start]Find the step where it asks which components to install. [cite: 38]
+3.  [cite_start]Make sure the checkbox for "Add Tesseract to system `PATH`" is selected. [cite: 39]
+4.  [cite_start]Finish the installation and run `RUN_monitor.bat` again. [cite: 40]
+
+### [cite_start]"Warning: sounddevice library not found..." [cite: 41]
+
+[cite_start]This means the `sounddevice` Python package couldn't load, and audio feedback will be disabled. [cite: 41] [cite_start]This can happen if your system doesn't have a recognized audio output device. [cite: 42] [cite_start]The core monitoring features will still work. [cite: 42]
