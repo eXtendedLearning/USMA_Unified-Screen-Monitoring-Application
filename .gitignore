@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+sm_venv/
+venv/
+ENV/
+env/
+
+# Portable Python (too large for git)
+python/
+
+# Portable Tesseract (too large for git)
+external/
+
+# Configuration Files
+configs/
+
+# Application Logs
+logs/
+*.log
+
+# Image and Signal Logs
+image_logs/
+signal_logs/
+
+# User Configurations (git tracks these)
+# configs/ folder is tracked by git
+
+# Temporary Files
+*.tmp
+*.temp
+setup_error.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Windows
+*.lnk
+
+# OLD FILES
+_old/

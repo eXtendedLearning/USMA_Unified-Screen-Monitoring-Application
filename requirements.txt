@@ -5,3 +5,4 @@ matplotlib
 Pillow
 scipy
 sounddevice
+pytesseract
