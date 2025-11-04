@@ -51,6 +51,14 @@ You must have these two programs installed before running the application:
 
 ---
 
+## Future Updates
+
+1. Portability updates - Portable installation and launcher with local Tesseract
+2. Tutorial for Region Of Interest (ROI) definition and script usage
+3. FRF self-calibration based on different datasets
+
+---
+
 ## Troubleshooting
 
 ### "ERROR: Tesseract-OCR not found in PATH..."
