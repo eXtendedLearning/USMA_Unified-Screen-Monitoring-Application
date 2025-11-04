@@ -1,23 +1,38 @@
 #!/usr/bin/env python3
 """
-USMA (Unified Screen Monitoring Application) - v.0.4.1
+USMA (Unified Screen Monitoring Application) - v.0.4.2 (Pre-Release)
 
 A single, GUI-driven application that combines a professional-grade region 
 configuration tool, real-time screen monitoring, visual overlay, and clear 
 image logging.
 
-v.0.4.1 Changes:
-- GUI Bugfix: Restored manual entry fields for x, y, width, and height in
-  the ConfigToolWindow, which were accidentally removed in v.0.4.0.
-- Advanced OCR "Divide and Conquer": 'hammer' and 'response' regions are
-  now internally split into a 'point' (0-70% width) and 'direction'
-  (70-100% width) sub-region. Each is scanned with specialized, highly
-  constrained whitelists and dictionary-disabled OCR.
-- Whitelist Correction: Whitelists are now more accurate (A-Z for points,
-  0-99 for Run).
-- Enhanced Diagnostics: "Color Filter Mask" logging now saves the
-  preprocessed images for the new 'point' and 'direction' sub-regions
-  for detailed debugging.
+--- Version Evolution (v.0.4.x) ---
+
+v.0.4.0:
+- OCR Integration: Added pytesseract for text extraction.
+- New Region Types: 'status', 'overload', and a single 'points' region.
+- Enhanced Logging: OCR data embedded in logs and signal headers (UFF Type 18).
+- Dynamic Filenaming: Logs named with hit counters (e.g., FRF_P1P1_1).
+- Manual POI Entry: Added manual input on main GUI as fallback.
+
+v.0.4.1:
+- OCR "Divide and Conquer": Replaced single 'points' region with three
+  dedicated regions ('run', 'hammer', 'response') for vastly improved
+  accuracy using single-line OCR (psm 7).
+- Advanced Preprocessing: Implemented CLAHE (contrast) and Sharpening
+  pipeline to read low-contrast text.
+- Bugfixes: Corrected 'points' regex parser, fixed GUI state-loss bug in
+  ConfigToolWindow, and re-enabled manual geometry entry (x,y,w,h).
+- Added Diagnostic Logs: Temporarily added OCR preprocessed images to
+  logs to debug parser failures.
+
+v.0.4.2 (This release):
+- Production Logging: Removed all OCR diagnostic images from logs. Image
+  logging for 'ROI Screenshot' and 'Color Filter Mask' now *only* saves
+  images related to 'wave' regions, cleaning up the output.
+- Portable Setup: Implemented logic to dynamically locate the Tesseract
+  OCR engine in the relative 'external/tesseract' directory, allowing
+  the application to be fully portable.
 """
 
 import cv2
@@ -49,15 +64,29 @@ except (ImportError, OSError) as e:
     print(f"Warning: sounddevice library not found or audio device error: {e}. Audio feedback disabled.")
 
 # --- OCR Configuration ---
-# NOTE: Tesseract OCR engine must be installed on the system for OCR to work.
-# On Windows, you may need to specify the path to the executable, e.g.:
+# NOTE: This version is configured to use the portable Tesseract OCR engine
+# located in the 'external/tesseract' directory.
 try:
     import pytesseract
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    
+    # --- Portable Tesseract Path ---
+    # Get the directory where the script is running
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    # Construct the relative path to the portable Tesseract executable
+    tesseract_path = os.path.join(script_dir, 'external', 'tesseract', 'tesseract.exe')
+    
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    
+    # Check if the portable Tesseract executable actually exists
+    if not os.path.exists(tesseract_path):
+        raise FileNotFoundError(f"Portable Tesseract not found at: {tesseract_path}")
+        
     OCR_AVAILABLE = True
-except (ImportError, FileNotFoundError):
+    
+except (ImportError, FileNotFoundError) as e:
     OCR_AVAILABLE = False
-    print("Warning: pytesseract library not found or Tesseract executable not at the specified path. OCR features will be disabled.")
+    print(f"Warning: Portable OCR features disabled. Error: {e}")
+    print("Please ensure 'pytesseract' is installed and Tesseract is in the 'external/tesseract' folder.")
 
 
 # --- 1. SETUP: DIRECTORY AND LOGGING CONFIGURATION ---
@@ -159,7 +188,7 @@ class ScreenMonitor:
         self.hit_counters.clear(); self.running = True
         self.last_known_status = "Unknown"; self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True); self.thread.start()
-        logger.info(f"Screen monitoring thread started for USMA v.0.4.1"); return True
+        logger.info(f"Screen monitoring thread started for USMA v.0.4.2"); return True
 
     def stop(self):
         self.running = False; self._stop_audio_feedback()
@@ -244,7 +273,6 @@ class ScreenMonitor:
         all_rois: Dict[str, np.ndarray] = {}
         ocr_diagnostics: Dict[str, np.ndarray] = {}
         
-        # Initialize points_info with defaults. It will be overwritten by OCR or manual data.
         frame_result.points_info = PointsInfo()
         
         for name, region in self.app_config.regions.items():
@@ -273,13 +301,13 @@ class ScreenMonitor:
                     point, dir, diag_imgs = self._analyze_point_and_dir(roi, "hammer")
                     if point: frame_result.points_info.hammer_point = point
                     if dir: frame_result.points_info.hammer_dir = dir
-                    ocr_diagnostics.update(diag_imgs) # Add point/dir diagnostics
+                    ocr_diagnostics.update(diag_imgs)
                     ocr_points_active = True
                 elif region.roi_type == 'response':
                     point, dir, diag_imgs = self._analyze_point_and_dir(roi, "response")
                     if point: frame_result.points_info.response_point = point
                     if dir: frame_result.points_info.response_dir = dir
-                    ocr_diagnostics.update(diag_imgs) # Add point/dir diagnostics
+                    ocr_diagnostics.update(diag_imgs)
                     ocr_points_active = True
                 
                 if diag_img is not None:
@@ -390,12 +418,10 @@ class ScreenMonitor:
         point, dir = None, None
         diag_imgs = {}
         try:
-            # 1. Split ROI into Point (left 70%) and Direction (right 30%)
             width = roi.shape[1]
             point_roi = roi[:, :int(width * 0.7)]
             dir_roi = roi[:, int(width * 0.7):]
 
-            # 2. Analyze Point ROI
             point_whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789 '
             point_text, point_diag = self._run_ocr(point_roi, psm=7, whitelist=point_whitelist, load_dawgs=False)
             point_regex = r'([A-Z])\s*:\s*(\d+)'
@@ -404,7 +430,6 @@ class ScreenMonitor:
                 point = f"{point_match.group(1).upper()}{point_match.group(2)}"
             diag_imgs[f"{name}_point"] = point_diag
 
-            # 3. Analyze Direction ROI
             dir_whitelist = '+-XYZ'
             dir_text, dir_diag = self._run_ocr(dir_roi, psm=7, whitelist=dir_whitelist, load_dawgs=False)
             dir_regex = r'([+\-][XYZ])'
@@ -475,7 +500,8 @@ class ScreenMonitor:
                 for r_name, r_img in all_rois.items():
                     try:
                         r_type = self.app_config.regions[r_name].roi_type
-                        cv2.imwrite(f"{full_base_filename}_01_ROI_{r_name}_{r_type}.jpg", r_img)
+                        if r_type == 'wave':
+                            cv2.imwrite(f"{full_base_filename}_01_ROI_{r_name}_{r_type}.jpg", r_img)
                     except KeyError:
                         logger.warning(f"Could not find region config for '{r_name}' during image logging.")
                     except Exception as e:
@@ -483,18 +509,6 @@ class ScreenMonitor:
 
             if self.image_log_options.include_color_filter: 
                 cv2.imwrite(f"{full_base_filename}_02_Mask.jpg", wave_result.color_mask)
-                for r_name, diag_img in ocr_diagnostics.items():
-                    if diag_img.size > 0:
-                        try:
-                            # r_name could be 'hammer_point', 'hammer_dir', 'status', etc.
-                            if r_name in self.app_config.regions:
-                                r_type = self.app_config.regions[r_name].roi_type
-                                cv2.imwrite(f"{full_base_filename}_02_Preprocessed_OCR_{r_name}_{r_type}.jpg", diag_img)
-                            else:
-                                # This handles the new sub-region diagnostics
-                                cv2.imwrite(f"{full_base_filename}_02_Preprocessed_OCR_{r_name}.jpg", diag_img)
-                        except Exception as e:
-                            logger.error(f"Failed to save OCR diagnostic image for '{r_name}': {e}")
             
             if self.image_log_options.include_signal_plot:
                 num_points = len(wave_result.signal_vector)
@@ -613,13 +627,11 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Label(f1, text="Name:", width=12).pack(side=tk.LEFT, padx=5); ttk.Entry(f1, textvariable=self.editor_vars['name']).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Label(f1, text="Type:").pack(side=tk.LEFT, padx=5); ttk.Combobox(f1, textvariable=self.editor_vars['roi_type'], values=['wave', 'status', 'overload', 'run', 'hammer', 'response'], state='readonly', width=8).pack(side=tk.LEFT, padx=5)
         
-        # --- Restored Manual Geometry Entry ---
         f_geom = ttk.Frame(editor_frame); f_geom.pack(fill=tk.X, pady=2)
         ttk.Label(f_geom, text="x:").grid(row=0, column=0, padx=5); ttk.Entry(f_geom, textvariable=self.editor_vars['x'], width=6).grid(row=0, column=1)
         ttk.Label(f_geom, text="y:").grid(row=0, column=2, padx=5); ttk.Entry(f_geom, textvariable=self.editor_vars['y'], width=6).grid(row=0, column=3)
         ttk.Label(f_geom, text="w:").grid(row=0, column=4, padx=5); ttk.Entry(f_geom, textvariable=self.editor_vars['width'], width=6).grid(row=0, column=5)
         ttk.Label(f_geom, text="h:").grid(row=0, column=6, padx=5); ttk.Entry(f_geom, textvariable=self.editor_vars['height'], width=6).grid(row=0, column=7)
-        # --- End Restored Section ---
 
         f_scale = ttk.LabelFrame(editor_frame, text="Physical Axis Scaling (for 'wave' regions)"); f_scale.pack(fill=tk.X, pady=5, padx=5)
         g = ttk.Frame(f_scale); g.pack(fill=tk.X); ttk.Label(g, text="X-Min (Hz):").grid(row=0, column=0, sticky=tk.W); ttk.Entry(g, textvariable=self.editor_vars['x_axis_min'], width=10).grid(row=0, column=1, padx=5); ttk.Label(g, text="X-Max (Hz):").grid(row=0, column=2, sticky=tk.W, padx=5); ttk.Entry(g, textvariable=self.editor_vars['x_axis_max'], width=10).grid(row=0, column=3, padx=5)
@@ -708,15 +720,18 @@ class ConfigToolWindow(tk.Toplevel):
         old_name, new_name = self.selected_region_name, self.editor_vars['name'].get()
         if new_name != old_name and new_name in self.app_config.regions: return messagebox.showerror("Error", "Region name must be unique.", parent=self)
         try:
-            # Read all values from the editor, including the restored x,y,w,h
             new_data = {k: v.get() for k, v in self.editor_vars.items()}
-            # Delete the old region and create a new one with the updated data
             del self.app_config.regions[old_name]
             updated_region = MonitoringRegion(**new_data)
             self.app_config.regions[new_name] = updated_region
             self.selected_region_name = new_name
             self._update_ui_from_data()
-        except (tk.TclError, Exception) as e: messagebox.showerror("Input Error", f"Invalid input value: {e}", parent=self)
+        except (tk.TclError, Exception) as e: 
+            messagebox.showerror("Input Error", f"Invalid input value: {e}", parent=self)
+            if old_name not in self.app_config.regions:
+                self.app_config.regions[old_name] = MonitoringRegion(**{k: v.get() for k, v in self.editor_vars.items() if k != 'name'}) 
+                self.editor_vars['name'].set(old_name)
+                
     def _delete_selected_region(self):
         if not self.selected_region_name: return messagebox.showerror("Error", "No region selected.", parent=self)
         if messagebox.askyesno("Confirm Delete", f"Delete '{self.selected_region_name}'?", parent=self):
@@ -747,7 +762,7 @@ class ConfigToolWindow(tk.Toplevel):
 # --- 5. MAIN GUI: THE CENTRAL CONTROL APPLICATION ---
 class MonitorControlGUI:
     def __init__(self, root):
-        self.root = root; self.root.title("USMA v.0.4.1"); self.root.geometry("850x550")
+        self.root = root; self.root.title("USMA v.0.4.2 (Release)"); self.root.geometry("850x550")
         self.config_path = tk.StringVar(value="configs/default_config.json")
         self.is_monitoring, self.is_overlay_on = tk.BooleanVar(value=False), tk.BooleanVar(value=False)
         self.verbose_logging_on, self.image_logging_on = tk.BooleanVar(value=True), tk.BooleanVar(value=False)

@@ -38,6 +38,7 @@ configs/
 # Application Logs
 logs/
 *.log
+run_log.txt
 
 # Image and Signal Logs
 image_logs/
