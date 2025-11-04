@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) - v.0.4.1
+# USMA (Unified Screen Monitoring Application) - v.0.4.2 (Portable Edition)
 
 This application provides a GUI for real-time screen monitoring, color analysis, and Optical Character Recognition (OCR) for specialized data logging.
 
@@ -6,7 +6,12 @@ This application provides a GUI for real-time screen monitoring, color analysis,
 
 ## Version History
 
-### v.0.4.1 (Current Release)
+### v.0.4.2 (Current Release)
+
+* **Production Logging:** Removed all OCR diagnostic images from logs. Image logging for 'ROI Screenshot' and 'Color Filter Mask' now *only* saves images related to 'wave' regions, cleaning up the output.
+* **Portable Setup:** Implemented logic to dynamically locate the Tesseract OCR engine in the relative `external/tesseract` directory, allowing the application to be fully portable.
+
+### v.0.4.1
 
 * **Portability & Installation Wizard:** Removed the hardcoded path to `tesseract.exe` from `monitor_app.py`. The app now correctly finds Tesseract from the system's `PATH`.
 * `RUN_monitor.bat` is now an installation "wizard" that automatically checks for Python, Tesseract, and installs all required Python packages in a virtual environment.
@@ -24,52 +29,49 @@ This application provides a GUI for real-time screen monitoring, color analysis,
 
 ## Requirements
 
-You must have these two programs installed before running the application:
+This is a **FULLY PORTABLE**, "ready-to-go" version of USMA.
 
-1.  **Python 3.x:**
-    * Download and install from python.org.
-    * **IMPORTANT:** During installation, make sure to check the box that says "Add Python to PATH".
+There is **NO setup**. Everything is pre-installed.
 
-2.  **Tesseract-OCR Engine:**
-    * This is an external program required for all OCR features (reading text from the screen).
-    * Download the installer from here: [https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
-    * **IMPORTANT:** During installation, you MUST check the box to "Add Tesseract to system PATH" (it might be under "Additional language data" or a similar component).
-    * If you do not do this, the application will not be able to find it.
+It includes:
+* A complete Python environment (no system installation needed)
+* Tesseract-OCR (no system installation needed)
+* All required Python libraries (pre-installed)
+
+You can copy this entire folder to USB drives, network drives, or offline machines.
 
 ---
 
 ## How to Run
 
-1.  Download all files from this repository (or clone it).
-2.  Double-click the `RUN_monitor.bat` file.
-    * This batch file is a "wizard" that will automatically:
-        * Check if Python is installed.
-        * Check if Tesseract-OCR is installed and in your `PATH`.
-        * Create a local Python virtual environment (in a folder named `sm_venv`).
-        * Install all required Python libraries (like `opencv`, `pytesseract`, `sounddevice`, etc.) into that environment.
-        * Launch the main application (`monitor_app.py`).
+1.  Unzip the entire package to a folder.
+2.  Double-click: **RUN_PORTABLE.bat**
+
+The application will start immediately.
 
 ---
 
 ## Future Updates
 
-1. Portability updates - Portable installation and launcher with local Tesseract
-2. Tutorial for Region Of Interest (ROI) definition and script usage
-3. FRF self-calibration based on different datasets
+1.  Tutorial for Region Of Interest (ROI) definition and script usage
+2.  FRF self-calibration based on different datasets
 
 ---
 
 ## Troubleshooting
 
-### "ERROR: Tesseract-OCR not found in PATH..."
+If the application window flashes and closes, please check the **`run_log.txt`** file that was created in this folder. It will contain the exact error message.
 
-You did not install Tesseract correctly.
+### Common errors:
 
-1.  Re-run the Tesseract installer (from the link above).
-2.  Find the step where it asks which components to install.
-3.  Make sure the checkbox for "Add Tesseract to system `PATH`" is selected.
-4.  Finish the installation and run `RUN_monitor.bat` again.
+* **Problem:** "Portable Python executable not found!"
+    * **Solution:** This means the 'python' folder (which contains the 300MB+ Python environment) is missing or incomplete. Please re-unzip the original package.
 
-### "Warning: sounddevice library not found..."
+* **Problem:** "Portable Tesseract executable not found!"
+    * **Solution:** This means the `external\tesseract` folder is missing. Please re-unzip the original package.
 
-This means the `sounddevice` Python package couldn't load, and audio feedback will be disabled. This can happen if your system doesn't have a recognized audio output device. The core monitoring features will still work.
+* **Problem:** ModuleNotFoundError: No module named 'cv2' (or similar)
+    * **Solution:** This indicates the 'python' folder is incomplete. Please re-unzip the original package.
+
+* **Problem:** ImportError: DLL load failed while importing _tkinter
+    * **Solution:** This indicates the 'python' folder is damaged or was created from an incompatible Python version. Please re-download the package.
