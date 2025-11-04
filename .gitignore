@@ -44,6 +44,9 @@ run_log.txt
 image_logs/
 signal_logs/
 
+# READMEs and stuff
+README_PORTABLE.txt
+
 # User Configurations (git tracks these)
 # configs/ folder is tracked by git
 
