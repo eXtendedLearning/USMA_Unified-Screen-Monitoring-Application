@@ -1,0 +1,8 @@
+opencv-python
+numpy
+pyautogui
+matplotlib
+Pillow
+scipy
+sounddevice
+pytesseract

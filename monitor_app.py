@@ -762,7 +762,7 @@ class ConfigToolWindow(tk.Toplevel):
 # --- 5. MAIN GUI: THE CENTRAL CONTROL APPLICATION ---
 class MonitorControlGUI:
     def __init__(self, root):
-        self.root = root; self.root.title("USMA v.0.4.2 (Release)"); self.root.geometry("850x550")
+        self.root = root; self.root.title("USMA v.0.4.2 (Pre-Release)"); self.root.geometry("850x550")
         self.config_path = tk.StringVar(value="configs/default_config.json")
         self.is_monitoring, self.is_overlay_on = tk.BooleanVar(value=False), tk.BooleanVar(value=False)
         self.verbose_logging_on, self.image_logging_on = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
