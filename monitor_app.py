@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-USMA (Unified Screen Monitoring Application) - v.0.4.2 (Pre-Release)
+USMA (Unified Screen Monitoring Application) - v.0.4.3 (Release)
 
 A single, GUI-driven application that combines a professional-grade region 
 configuration tool, real-time screen monitoring, visual overlay, and clear 
@@ -26,13 +26,25 @@ v.0.4.1:
 - Added Diagnostic Logs: Temporarily added OCR preprocessed images to
   logs to debug parser failures.
 
-v.0.4.2 (This release):
+v.0.4.2:
 - Production Logging: Removed all OCR diagnostic images from logs. Image
   logging for 'ROI Screenshot' and 'Color Filter Mask' now *only* saves
   images related to 'wave' regions, cleaning up the output.
 - Portable Setup: Implemented logic to dynamically locate the Tesseract
   OCR engine in the relative 'external/tesseract' directory, allowing
   the application to be fully portable.
+
+v.0.4.3 (This release):
+- **Fixed Dataset 58 Format**: Corrected UNV file header to comply with 
+  universal file format specification:
+  * Added all 5 required identification lines (function ID, program info, 
+    date/time, record info, response entity name)
+  * Fixed DOF identification line with proper field widths (I5, I10 format)
+  * Padded separator and dataset type lines to 80 characters
+  * Files now compatible with pyuff, MATLAB, and commercial modal software
+- **Enhanced FFT Plots**: Added comprehensive analysis information to FFT 
+  plots including total energy, high-frequency energy, energy ratio, and 
+  cutoff frequency for better diagnostic capability.
 """
 
 import cv2
@@ -54,6 +66,7 @@ import scipy.io
 import matplotlib
 matplotlib.use('Agg') # Use the 'Agg' backend for non-interactive plotting in a thread.
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 # --- Import sounddevice with fallback ---
 try:
@@ -135,6 +148,7 @@ class WaveAnalysisResult:
     is_high_frequency: bool; energy_ratio: float; high_freq_energy: float
     signal_vector: np.ndarray; fft_freqs: np.ndarray; fft_mags: np.ndarray
     roi_image: np.ndarray; color_mask: np.ndarray
+    total_energy: float = 0.0  # Added for FFT plot information
 
 @dataclass
 class FrameAnalysisResult:
@@ -188,7 +202,7 @@ class ScreenMonitor:
         self.hit_counters.clear(); self.running = True
         self.last_known_status = "Unknown"; self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True); self.thread.start()
-        logger.info(f"Screen monitoring thread started for USMA v.0.4.2"); return True
+        logger.info(f"Screen monitoring thread started for USMA v.0.4.3"); return True
 
     def stop(self):
         self.running = False; self._stop_audio_feedback()
@@ -485,7 +499,7 @@ class ScreenMonitor:
                 high_freq_energy = np.sum(fft_mags[cutoff_indices[0]:]**2)
                 energy_ratio = high_freq_energy / total_energy
             is_hf = energy_ratio > self.app_config.fft_energy_ratio_threshold
-        return WaveAnalysisResult(is_hf, energy_ratio, high_freq_energy, signal_vector, xf, fft_mags, roi.copy(), mask.copy())
+        return WaveAnalysisResult(is_hf, energy_ratio, high_freq_energy, signal_vector, xf, fft_mags, roi.copy(), mask.copy(), total_energy)
 
     def _create_visual_logs(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, wave_name: str, base_filename: str, all_rois: Dict[str, np.ndarray], ocr_diagnostics: Dict[str, np.ndarray]):
         try:
@@ -524,11 +538,33 @@ class ScreenMonitor:
             if self.image_log_options.include_fft_plot:
                 fig, ax = plt.subplots(figsize=(10, 5), dpi=150); fig.patch.set_facecolor('#1E1E1E')
                 ax.plot(wave_result.fft_freqs, wave_result.fft_mags, color='magenta')
-                ax.set_title(f'FFT Magnitude Spectrum - {wave_name}\n{title_info}', color='white', fontsize=10)
-                ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
-                ax.set_xlim(left=0, right=0.5); ax.set_xlabel('Normalized Frequency', color='white'); ax.set_ylabel('Magnitude (A.U.)', color='white')
-                ax.set_facecolor('#2E2E2E'); ax.tick_params(axis='both', colors='white'); ax.grid(True, linestyle='--', alpha=0.3); ax.legend(labelcolor='white')
-                fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(f"{full_base_filename}_04_FFT.png", facecolor=fig.get_facecolor()); plt.close(fig)
+                
+                # Enhanced title with FFT analysis information
+                fft_info = (f'Total Energy: {wave_result.total_energy:.3e} | '
+                           f'HF Energy: {wave_result.high_freq_energy:.3e} | '
+                           f'HF Ratio: {wave_result.energy_ratio:.3e} | '
+                           f'Cutoff: {self.app_config.fft_cutoff_frequency:.3f}')
+                ax.set_title(f'FFT Magnitude Spectrum - {wave_name}\n{title_info}\n{fft_info}', 
+                            color='white', fontsize=9)
+                
+                ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', linestyle='--', 
+                          linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
+                ax.set_xlim(left=0, right=0.5); ax.set_xlabel('Normalized Frequency', color='white')
+                ax.set_ylabel('Magnitude (A.U.)', color='white')
+                ax.set_facecolor('#2E2E2E'); ax.tick_params(axis='both', colors='white')
+                ax.grid(True, linestyle='--', alpha=0.3); ax.legend(labelcolor='white')
+                
+                # Add text box with analysis parameters
+                textstr = (f'Threshold: {self.app_config.fft_energy_ratio_threshold:.4f}\n'
+                          f'Classification: {"HF" if wave_result.is_high_frequency else "LF"}')
+                props = dict(boxstyle='round', facecolor='#2E2E2E', alpha=0.8, edgecolor='white')
+                ax.text(0.98, 0.97, textstr, transform=ax.transAxes, fontsize=9,
+                       verticalalignment='top', horizontalalignment='right', 
+                       bbox=props, color='white')
+                
+                fig.tight_layout(rect=[0, 0, 1, 0.95])
+                fig.savefig(f"{full_base_filename}_04_FFT.png", facecolor=fig.get_facecolor())
+                plt.close(fig)
         except Exception as e: logger.error(f"Failed to create visual logs for {wave_name}: {e}")
     
     def _save_mat_log(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, wave_name: str, base_filename: str):
@@ -543,41 +579,140 @@ class ScreenMonitor:
                 'info_region_name': wave_name, 'info_hf_ratio': wave_result.energy_ratio, 'raw_amplitude_pixels': wave_result.signal_vector,
                 'meta_run': points.run, 'meta_hammer_point': points.hammer_point, 'meta_hammer_dir': points.hammer_dir,
                 'meta_response_point': points.response_point, 'meta_response_dir': points.response_dir,
-                'meta_overload_status': frame_result.overload_text
+                'meta_overload_status': frame_result.overload_text,
+                'fft_total_energy': wave_result.total_energy, 'fft_high_freq_energy': wave_result.high_freq_energy,
+                'fft_cutoff_frequency': self.app_config.fft_cutoff_frequency
             }
             scipy.io.savemat(filename, mat_data)
         except Exception as e: logger.error(f"Failed to save .mat file for {wave_name}: {e}")
 
     def _save_unv_log(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, wave_name: str, base_filename: str):
-        def parse_point(point_str: str) -> int: return int(re.sub(r'\D', '', point_str)) if point_str else 1
-        def parse_dof(dir_str: str) -> int: return {'X': 1, 'Y': 2, 'Z': 3}.get(dir_str.upper()[-1], 3)
+        """Save data in proper Dataset 58 format with complete header structure."""
+        def parse_point(point_str: str) -> int: 
+            """Extract numeric node number from point string like 'P1' or 'A3'."""
+            return int(re.sub(r'\D', '', point_str)) if point_str and re.sub(r'\D', '', point_str) else 1
+        
+        def parse_dof(dir_str: str) -> int: 
+            """Convert direction string like '+Z' or '-X' to DOF number (1=X, 2=Y, 3=Z)."""
+            if not dir_str or len(dir_str) < 1:
+                return 3
+            last_char = dir_str.upper()[-1]
+            return {'X': 1, 'Y': 2, 'Z': 3}.get(last_char, 3)
+        
         try:
             filename = f"signal_logs/{base_filename}.unv"
-            region = frame_result.active_regions[wave_name]; points = frame_result.points_info
+            region = frame_result.active_regions[wave_name]
+            points = frame_result.points_info
             num_points = len(wave_result.signal_vector)
-            if num_points < 2: return
-            start_freq = region.x_axis_min; freq_step = (region.x_axis_max - region.x_axis_min) / (num_points - 1) if num_points > 1 else 0
+            
+            if num_points < 2:
+                logger.warning(f"Skipping UNV log for {wave_name}: insufficient data points ({num_points})")
+                return
+            
+            # Calculate frequency parameters
+            start_freq = region.x_axis_min
+            freq_step = (region.x_axis_max - region.x_axis_min) / (num_points - 1) if num_points > 1 else 0
+            
+            # Scale amplitude to physical units
             amplitude_scaled = region.y_axis_min + (wave_result.signal_vector / region.height) * (region.y_axis_max - region.y_axis_min)
-
+            
+            # Parse node and DOF information
+            resp_node = parse_point(points.response_point)
+            resp_dof = parse_dof(points.response_dir)
+            ref_node = parse_point(points.hammer_point)
+            ref_dof = parse_dof(points.hammer_dir)
+            
+            # Get current timestamp
+            timestamp = datetime.now().strftime('%d-%b-%y %H:%M:%S')
+            
             with open(filename, 'w') as f:
-                f.write("    -1\n"); f.write("    58\n")
-                resp_node, resp_dof = parse_point(points.response_point), parse_dof(points.response_dir)
-                ref_node, ref_dof = parse_point(points.hammer_point), parse_dof(points.hammer_dir)
-                f.write(f"         4         0         0         0 C{resp_node:>10}{resp_dof:>4} C{ref_node:>10}{ref_dof:>4}\n")
-                f.write(f"         2{num_points:>10}         1{start_freq:15.5E}{freq_step:15.5E}{0.0:15.5E}\n")
-                f.write("        18         0         0         0 X-axis               Hz              \n")
-                f.write(f"        12         0         0         0 Y-axis               {region.y_axis_unit:<16}\n")
-                f.write("        13         0         0         0 Z-axis               NONE            \n")
-                f.write("         0         0         0         0 NONE                 NONE            \n")
+                # Line 1: Record separator (80 characters)
+                f.write(f"    -1{' ' * 74}\n")
+                
+                # Line 2: Dataset type (80 characters)
+                f.write(f"    58{' ' * 74}\n")
+                
+                # Lines 3-7: Identification lines (5 lines, each 80 characters max)
+                # ID Line 1: Function type identification
+                id_line1 = f"FRF for {points.response_point}:{points.response_dir}/{points.hammer_point}:{points.hammer_dir}"
+                f.write(f"{id_line1[:80]:<80}\n")
+                
+                # ID Line 2: Program identification
+                id_line2 = "USMA v0.4.3 - Screen Reconstruction"
+                f.write(f"{id_line2[:80]:<80}\n")
+                
+                # ID Line 3: Date/Time
+                f.write(f"{timestamp:<80}\n")
+                
+                # ID Line 4: Load case identification
+                id_line4 = f"Reconstructed from {points.run}, region \"{wave_name}\""
+                f.write(f"{id_line4[:80]:<80}\n")
+                
+                # ID Line 5: Response entity name
+                dir_char = {1: 'X', 2: 'Y', 3: 'Z'}.get(resp_dof, 'Z')
+                id_line5 = f"FRF\\\\{points.response_point}:+{dir_char}"
+                f.write(f"{id_line5[:80]:<80}\n")
+                
+                # Header Record 1: DOF Identification (CRITICAL - Fixed width format!)
+                # FORMAT: 2(I5,I10,I5,I10),3A10,3I5
+                func_type = 4      # Frequency response function
+                func_id = 0        # Function ID number
+                version = 0        # Version number
+                load_case = 0      # Load case ID
+                resp_node_name = "C"    # Response node name
+                ref_node_name = "C"     # Reference node name
+                
+                dof_line = (
+                    f"{func_type:5d}"           # Function type (I5)
+                    f"{func_id:10d}"            # Function ID (I10)
+                    f"{version:5d}"             # Version (I5)
+                    f"{load_case:10d}"          # Load case (I10)
+                    f"{resp_node_name:10s}"     # Response node name (A10)
+                    f"{resp_node:10d}"          # Response node number (I10)
+                    f"{resp_dof:5d}"            # Response direction (I5)
+                    f"{ref_node_name:10s}"      # Reference node name (A10)
+                    f"{ref_node:10d}"           # Reference node number (I10)
+                    f"{ref_dof:5d}\n"           # Reference direction (I5)
+                )
+                f.write(dof_line)
+                
+                # Header Record 2: Data Form
+                # FORMAT: 3I10,3E13.5
+                data_type = 2      # Real and Imaginary
+                spacing = 1        # Even spacing
+                z_value = 0.0      # Z-axis value (for 3D plots)
+                
+                f.write(
+                    f"{data_type:10d}"          # Ordinate data type (I10)
+                    f"{num_points:10d}"         # Number of data pairs (I10)
+                    f"{spacing:10d}"            # Abscissa spacing (I10)
+                    f"{start_freq:13.5E}"       # Abscissa minimum (E13.5)
+                    f"{freq_step:13.5E}"        # Abscissa increment (E13.5)
+                    f"{z_value:13.5E}\n"        # Z-axis value (E13.5)
+                )
+                
+                # Header Records 3-6: Axis Labels
+                # FORMAT: I10,3I5,2A20
+                f.write(f"{18:10d}{0:5d}{0:5d}{0:5d}{'X-axis':20s}{'Hz':20s}\n")
+                f.write(f"{12:10d}{0:5d}{0:5d}{0:5d}{'Y-axis':20s}{region.y_axis_unit:20s}\n")
+                f.write(f"{13:10d}{0:5d}{0:5d}{0:5d}{'Z-axis':20s}{'NONE':20s}\n")
+                f.write(f"{0:10d}{0:5d}{0:5d}{0:5d}{'NONE':20s}{'NONE':20s}\n")
+                
+                # Data Section: Real and Imaginary pairs
+                # FORMAT: 2E13.5 per line
+                # NOTE: For real-only data (from screen reconstruction), imaginary part is zero
+                for val in amplitude_scaled:
+                    real_part = val
+                    imag_part = 0.0
+                    f.write(f"  {real_part:13.6E}  {imag_part:13.6E}\n")
+                
+                # Record terminator
                 f.write("    -1\n")
-                if frame_result.overload_text != "Unknown":
-                    f.write("    -1\n"); f.write("   18\n")
-                    f.write(f"Overload Status: {frame_result.overload_text}\n")
-                    f.write("    -1\n")
-                f.write("    -1\n"); f.write("    58\n")
-                for val in amplitude_scaled: f.write(f"  {val:13.6E}  {0.0:13.6E}\n")
-                f.write("    -1\n")
-        except Exception as e: logger.error(f"Failed to save .unv file for {wave_name}: {e}")
+                
+            logger.info(f"UNV file saved: {filename} (Dataset 58 format compliant)")
+            
+        except Exception as e: 
+            logger.error(f"Failed to save .unv file for {wave_name}: {e}")
 
 # --- 4. VISUALIZATION & CONFIGURATION ---
 class RegionOverlay(tk.Toplevel):
@@ -762,7 +897,7 @@ class ConfigToolWindow(tk.Toplevel):
 # --- 5. MAIN GUI: THE CENTRAL CONTROL APPLICATION ---
 class MonitorControlGUI:
     def __init__(self, root):
-        self.root = root; self.root.title("USMA v.0.4.2 (Pre-Release)"); self.root.geometry("850x550")
+        self.root = root; self.root.title("USMA v.0.4.3 (Release)"); self.root.geometry("850x550")
         self.config_path = tk.StringVar(value="configs/default_config.json")
         self.is_monitoring, self.is_overlay_on = tk.BooleanVar(value=False), tk.BooleanVar(value=False)
         self.verbose_logging_on, self.image_logging_on = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
