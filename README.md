@@ -59,17 +59,17 @@ This application provides a GUI for real-time screen monitoring, color analysis,
 
 ## WHAT'S INCLUDED
 ---------------
-RUN_USMA_PORTABLE.bat   - Application launcher (START HERE!)
-monitor_app.py          - Main application
-requirements.txt        - Dependency list (for reference)
+- RUN_USMA_PORTABLE.bat   - Application launcher (START HERE!)
+- monitor_app.py          - Main application
+- requirements.txt        - Dependency list (for reference)
 
-python\                 - Portable Python 3.11.9 with all dependencies
-external\tesseract\     - Portable Tesseract OCR engine
+- python\                 - Portable Python 3.11.9 with all dependencies
+- external\tesseract\     - Portable Tesseract OCR engine
 
-configs\                - Configuration files (created on first use)
-logs\                   - Application logs (created on first use)
-image_logs\             - Image logs (created when enabled)
-signal_logs\            - Signal data logs (created when enabled)
+- configs\                - Configuration files (created on first use)
+- logs\                   - Application logs (created on first use)
+- image_logs\             - Image logs (created when enabled)
+- signal_logs\            - Signal data logs (created when enabled)
 
 
 ## SYSTEM REQUIREMENTS
