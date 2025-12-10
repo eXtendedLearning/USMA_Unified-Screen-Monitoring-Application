@@ -1,5 +1,5 @@
 @echo off
-TITLE USMA v0.4.2 - Portable Launcher
+TITLE USMA v0.4.3 - Portable Launcher
 
 cd /d "%~dp0"
 
