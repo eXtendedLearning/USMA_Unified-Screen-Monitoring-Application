@@ -4,7 +4,7 @@ TITLE USMA v0.4.3 - Portable Launcher
 cd /d "%~dp0"
 
 echo ========================================
-echo USMA v0.4.2 - Portable Edition
+echo USMA v0.4.3 - Portable Edition
 echo ========================================
 echo.
 
