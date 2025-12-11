@@ -32,6 +32,8 @@ v.0.4.4 (This release):
   reasoning (BAD/SUSPECT/GOOD with method details)
 - **Scrollable Config Tool**: Right panel now scrollable for smaller screens
 - **Extended Logging Options**: Separate checkbox for OCR diagnostic images
+- **BUGFIX**: Fixed memory leak from matplotlib figures in background thread
+- **BUGFIX**: Fixed GDI resource exhaustion from hit_history accumulation
 """
 
 import cv2
@@ -43,6 +45,7 @@ import json
 import os
 import logging
 import re
+import gc
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from dataclasses import dataclass, asdict, field
@@ -52,7 +55,7 @@ from scipy.fft import rfft, rfftfreq
 from scipy.signal import butter, filtfilt
 import scipy.io
 import matplotlib
-matplotlib.use('TkAgg')
+matplotlib.use('TkAgg')  # For the embedded viewer only
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -84,7 +87,6 @@ except (ImportError, FileNotFoundError) as e:
 def setup_environment():
     """Create necessary directories for logs, configs, and organized image logs."""
     base_folders = ['logs', 'configs', 'signal_logs']
-    # Organized image log subfolders
     image_subfolders = [
         'image_logs/ROIs',
         'image_logs/ColorMasks', 
@@ -115,14 +117,14 @@ logger.addHandler(stream_handler)
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
 @dataclass
 class ImageLogOptions:
-    include_screenshot: bool = False      # Wave ROI screenshots
-    include_color_filter: bool = False    # Color masks
-    include_signal_plot: bool = False     # Reconstructed signal
-    include_fft_plot: bool = False        # FFT spectrum
-    include_lowpass_plot: bool = False    # Lowpass comparison
-    include_residual_plot: bool = False   # Residual analysis
-    include_summary_chart: bool = False   # Run summary bar chart
-    include_ocr_images: bool = False      # OCR diagnostic images (NEW)
+    include_screenshot: bool = False
+    include_color_filter: bool = False
+    include_signal_plot: bool = False
+    include_fft_plot: bool = False
+    include_lowpass_plot: bool = False
+    include_residual_plot: bool = False
+    include_summary_chart: bool = False
+    include_ocr_images: bool = False
 
 @dataclass
 class DataLogOptions:
@@ -160,7 +162,6 @@ class MonitoringRegion:
 @dataclass
 class WaveAnalysisResult:
     """Extended to include lowpass residual analysis results in physical units."""
-    # Existing FFT fields
     is_high_frequency: bool
     energy_ratio: float
     high_freq_energy: float
@@ -170,8 +171,6 @@ class WaveAnalysisResult:
     roi_image: np.ndarray
     color_mask: np.ndarray
     total_energy: float = 0.0
-    
-    # Physical-unit signal and lowpass analysis
     signal_physical: Optional[np.ndarray] = None
     filtered_physical: Optional[np.ndarray] = None
     residual_physical: Optional[np.ndarray] = None
@@ -179,6 +178,27 @@ class WaveAnalysisResult:
     exceedance_ratio: float = 0.0
     lowpass_is_bad_hit: bool = False
     y_axis_unit: str = "g/N"
+
+@dataclass
+class LightweightHitData:
+    """Lightweight version of hit data for history storage - avoids memory bloat."""
+    signal_physical: np.ndarray
+    filtered_physical: Optional[np.ndarray]
+    residual_physical: Optional[np.ndarray]
+    fft_freqs: np.ndarray
+    fft_mags: np.ndarray
+    energy_ratio: float
+    is_high_frequency: bool
+    exceedance_count: int
+    exceedance_ratio: float
+    lowpass_is_bad_hit: bool
+    total_energy: float
+    high_freq_energy: float
+    y_axis_unit: str
+    x_axis_min: float
+    x_axis_max: float
+    hit_key: str
+    run: str
 
 @dataclass
 class FrameAnalysisResult:
@@ -194,7 +214,6 @@ class FrameAnalysisResult:
     avg_exceedance_count: Optional[float] = None
     avg_exceedance_ratio: Optional[float] = None
     overall_lowpass_bad: Optional[bool] = None
-    # OCR diagnostic images for logging
     ocr_images: Dict[str, np.ndarray] = field(default_factory=dict)
 
 @dataclass
@@ -205,7 +224,6 @@ class AppConfig:
     screenshot_interval: float = 0.25
     fft_cutoff_frequency: float = 0.09
     fft_energy_ratio_threshold: float = 0.013
-    # Lowpass analysis parameters
     lowpass_cutoff: float = 0.05
     lowpass_filter_order: int = 4
     residual_threshold: float = 0.005
@@ -241,11 +259,9 @@ class ScreenMonitor:
         self.last_known_status: str = "Unknown"
         self.last_known_overload: str = "Unknown"
         
-        # Enhanced OCR preprocessing tools
         self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         self.sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         
-        # Run history for summary chart
         self.run_history: Dict[str, Dict] = {}
         self.current_run: str = "Run 1"
 
@@ -456,12 +472,10 @@ class ScreenMonitor:
             frame_result.points_info = self.manual_points_info
 
         if frame_result.wave_results:
-            # FFT classification aggregation
             classifications = [res.is_high_frequency for res in frame_result.wave_results.values()]
             frame_result.overall_is_hf = sum(classifications) > len(classifications) / 2 if classifications else False
             frame_result.avg_energy_ratio = np.mean([res.energy_ratio for res in frame_result.wave_results.values()])
             frame_result.avg_high_freq_energy = np.mean([res.high_freq_energy for res in frame_result.wave_results.values()])
-            # Lowpass aggregation
             frame_result.avg_exceedance_count = np.mean([res.exceedance_count for res in frame_result.wave_results.values()])
             frame_result.avg_exceedance_ratio = np.mean([res.exceedance_ratio for res in frame_result.wave_results.values()])
             lp_classifications = [res.lowpass_is_bad_hit for res in frame_result.wave_results.values()]
@@ -481,7 +495,6 @@ class ScreenMonitor:
         if has_changed:
             points = frame_result.points_info
             
-            # Determine classification for verbose logging
             fft_bad = frame_result.overall_is_hf
             lp_bad = frame_result.overall_lowpass_bad if frame_result.overall_lowpass_bad is not None else False
             
@@ -495,14 +508,12 @@ class ScreenMonitor:
                 classification = "GOOD HIT"
             
             if self.verbose_logging_enabled:
-                # Log OCR values
                 logger.info(f"--- WAVE EVENT DETECTED ---")
                 logger.info(f"  OCR Status: '{frame_result.status_text}'")
                 logger.info(f"  OCR Overload: '{frame_result.overload_text}'")
                 logger.info(f"  OCR Run: '{points.run}'")
                 logger.info(f"  OCR Hammer: '{points.hammer_point}' Dir: '{points.hammer_dir}'")
                 logger.info(f"  OCR Response: '{points.response_point}' Dir: '{points.response_dir}'")
-                # Log analysis values
                 logger.info(f"  FFT Energy Ratio: {frame_result.avg_energy_ratio:.3e} (threshold: {self.app_config.fft_energy_ratio_threshold:.3e}) -> {'BAD' if fft_bad else 'OK'}")
                 logger.info(f"  LP Exceedances: {frame_result.avg_exceedance_count:.0f} ({frame_result.avg_exceedance_ratio:.1%}) (threshold: {self.app_config.exceedance_ratio_threshold:.1%}) -> {'BAD' if lp_bad else 'OK'}")
                 logger.info(f"  CLASSIFICATION: {classification}")
@@ -515,7 +526,6 @@ class ScreenMonitor:
             current_hit = self.hit_counters.get(counter_key, 0) + 1
             self.hit_counters[counter_key] = current_hit
             
-            # Store in run history for summary chart
             hit_key = f"{counter_key}_{current_hit}"
             self.current_run = points.run
             if self.current_run not in self.run_history:
@@ -523,8 +533,8 @@ class ScreenMonitor:
             
             for wave_name, wave_result in frame_result.wave_results.items():
                 base_filename = f"{wave_name}_{counter_key}_{current_hit}"
+                region = frame_result.active_regions[wave_name]
                 
-                # Store hit data for summary
                 self.run_history[self.current_run][hit_key] = {
                     'exceedance_count': wave_result.exceedance_count,
                     'exceedance_ratio': wave_result.exceedance_ratio,
@@ -540,50 +550,59 @@ class ScreenMonitor:
                 if self.data_log_options.log_unv: 
                     self._save_unv_log(wave_result, frame_result, wave_name, base_filename)
                 
-                # Notify plot callback
                 if self.plot_callback:
-                    self.plot_callback(wave_result, frame_result, wave_name, hit_key)
+                    # Create lightweight copy for plot callback
+                    lightweight_data = LightweightHitData(
+                        signal_physical=wave_result.signal_physical.copy() if wave_result.signal_physical is not None else np.array([]),
+                        filtered_physical=wave_result.filtered_physical.copy() if wave_result.filtered_physical is not None else None,
+                        residual_physical=wave_result.residual_physical.copy() if wave_result.residual_physical is not None else None,
+                        fft_freqs=wave_result.fft_freqs.copy(),
+                        fft_mags=wave_result.fft_mags.copy(),
+                        energy_ratio=wave_result.energy_ratio,
+                        is_high_frequency=wave_result.is_high_frequency,
+                        exceedance_count=wave_result.exceedance_count,
+                        exceedance_ratio=wave_result.exceedance_ratio,
+                        lowpass_is_bad_hit=wave_result.lowpass_is_bad_hit,
+                        total_energy=wave_result.total_energy,
+                        high_freq_energy=wave_result.high_freq_energy,
+                        y_axis_unit=region.y_axis_unit,
+                        x_axis_min=region.x_axis_min,
+                        x_axis_max=region.x_axis_max,
+                        hit_key=hit_key,
+                        run=points.run
+                    )
+                    self.plot_callback(lightweight_data, self.run_history.copy())
 
     # =========================================================================
-    # ENHANCED OCR METHODS (Improved Robustness)
+    # ENHANCED OCR METHODS
     # =========================================================================
     
     def _preprocess_for_ocr(self, roi: np.ndarray, scale_factor: int = 4, 
                             use_clahe: bool = True, use_sharpen: bool = True,
                             use_morphology: bool = False, invert: bool = True) -> np.ndarray:
-        """
-        Enhanced preprocessing pipeline for OCR with multiple options.
-        Returns the preprocessed binary image.
-        """
         if roi.size == 0:
             return np.array([])
         
-        # Scale up for better OCR
         width = int(roi.shape[1] * scale_factor)
         height = int(roi.shape[0] * scale_factor)
         resized = cv2.resize(roi, (width, height), interpolation=cv2.INTER_CUBIC)
         
-        # Convert to grayscale
         if len(resized.shape) == 3:
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         else:
             gray = resized
         
-        # CLAHE for contrast enhancement
         if use_clahe:
             gray = self.clahe.apply(gray)
         
-        # Sharpening
         if use_sharpen:
             gray = cv2.filter2D(gray, -1, self.sharpen_kernel)
         
-        # Thresholding
         if invert:
             thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
         else:
             thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         
-        # Morphological operations to clean up
         if use_morphology:
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -594,7 +613,6 @@ class ScreenMonitor:
     def _run_ocr_with_config(self, image: np.ndarray, psm: int = 7, 
                               whitelist: Optional[str] = None, 
                               load_dawgs: bool = True) -> str:
-        """Run OCR with specific configuration."""
         try:
             custom_config = f'--oem 3 --psm {psm}'
             if whitelist:
@@ -609,13 +627,8 @@ class ScreenMonitor:
             return ""
 
     def _analyze_status_robust(self, roi: np.ndarray) -> Tuple[str, Dict[str, np.ndarray]]:
-        """
-        Robust status analysis with multiple preprocessing attempts.
-        Returns (status_text, diagnostic_images_dict)
-        """
         diag_imgs = {}
         
-        # Try multiple preprocessing configurations
         configs = [
             {'scale_factor': 4, 'use_clahe': True, 'use_sharpen': True, 'use_morphology': False, 'invert': True},
             {'scale_factor': 5, 'use_clahe': True, 'use_sharpen': False, 'use_morphology': True, 'invert': True},
@@ -631,12 +644,10 @@ class ScreenMonitor:
             if preprocessed.size == 0:
                 continue
                 
-            # Try PSM 7 (single line) and PSM 6 (block)
             for psm in [7, 6]:
                 text = self._run_ocr_with_config(preprocessed, psm=psm)
                 text_lower = text.lower()
                 
-                # Check for status keywords
                 if 'wait' in text_lower or 'trigger' in text_lower:
                     diag_imgs['status_preprocessed'] = preprocessed
                     return "Waiting for Trigger...", diag_imgs
@@ -651,40 +662,34 @@ class ScreenMonitor:
                     best_text = text
                     best_img = preprocessed
         
-        # Fallback to color analysis
         mean_color = np.mean(roi, axis=(0, 1))
         if best_img is not None:
             diag_imgs['status_preprocessed'] = best_img
         
-        # Green = Measuring, Red/Orange = Waiting, Blue = Ready (typical TestLab colors)
-        if mean_color[1] > 120 and mean_color[1] > mean_color[2]:  # Green dominant
+        if mean_color[1] > 120 and mean_color[1] > mean_color[2]:
             return "Measuring... (color)", diag_imgs
-        if mean_color[2] > 120 and mean_color[2] > mean_color[1]:  # Red/Orange dominant
+        if mean_color[2] > 120 and mean_color[2] > mean_color[1]:
             return "Waiting for Trigger... (color)", diag_imgs
-        if mean_color[0] > 120:  # Blue dominant
+        if mean_color[0] > 120:
             return "Ready (color)", diag_imgs
         
         return f"Unknown (OCR: '{best_text[:20]}')" if best_text else "Unknown", diag_imgs
 
     def _analyze_overload_robust(self, roi: np.ndarray) -> Tuple[str, Dict[str, np.ndarray]]:
-        """Robust overload analysis."""
         diag_imgs = {}
         
-        # Check color first - overload is typically red
         mean_color = np.mean(roi, axis=(0, 1))
         is_red = mean_color[2] > 150 and mean_color[1] < 100 and mean_color[0] < 100
         
         if not is_red:
             return "No Overload", diag_imgs
         
-        # Try OCR if red detected
         preprocessed = self._preprocess_for_ocr(roi, scale_factor=4)
         diag_imgs['overload_preprocessed'] = preprocessed
         
         whitelist = '0123456789ChannelinOverload '
         text = self._run_ocr_with_config(preprocessed, psm=7, whitelist=whitelist)
         
-        # Extract channel count
         match = re.search(r'(\d+)\s*Channel', text, re.IGNORECASE)
         if match:
             return f"{match.group(1)} Channel in Overload", diag_imgs
@@ -692,10 +697,6 @@ class ScreenMonitor:
         return "Channel in Overload", diag_imgs
 
     def _analyze_run_robust(self, roi: np.ndarray) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
-        """
-        Robust run number analysis with multiple attempts.
-        Returns (run_string, diagnostic_images_dict)
-        """
         diag_imgs = {}
         
         configs = [
@@ -713,41 +714,27 @@ class ScreenMonitor:
             
             diag_imgs[f'run_attempt_{i}'] = preprocessed
             
-            for psm in [7, 8, 6]:  # Single line, single word, block
+            for psm in [7, 8, 6]:
                 text = self._run_ocr_with_config(preprocessed, psm=psm, whitelist=whitelist, load_dawgs=False)
                 
-                # Try to find "Run" followed by number
                 run_match = re.search(r'[Rr][Uu][Nn]\s*(\d+)', text)
                 if run_match:
                     run_str = f"Run {run_match.group(1)}"
-                    if self.verbose_logging_enabled:
-                        logger.debug(f"Run OCR success: '{run_str}' from '{text}'")
                     return run_str, diag_imgs
                 
-                # Try just finding a number if "Run" label is nearby but not in ROI
                 num_match = re.search(r'^(\d+)$', text.strip())
                 if num_match:
                     run_str = f"Run {num_match.group(1)}"
                     return run_str, diag_imgs
         
-        if self.verbose_logging_enabled:
-            logger.debug(f"Run OCR failed, no match found")
         return None, diag_imgs
 
     def _analyze_point_and_dir_robust(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Optional[str], Dict[str, np.ndarray]]:
-        """
-        Robust point and direction analysis with split ROI approach.
-        Returns (point_string, direction_string, diagnostic_images_dict)
-        """
         point, direction = None, None
         diag_imgs = {}
         
         try:
-            # Determine split ratio based on ROI width
             width = roi.shape[1]
-            height = roi.shape[0]
-            
-            # Try different split ratios
             split_ratios = [0.65, 0.70, 0.75, 0.60]
             
             for split_ratio in split_ratios:
@@ -755,20 +742,17 @@ class ScreenMonitor:
                 point_roi = roi[:, :split_x]
                 dir_roi = roi[:, split_x:]
                 
-                # Analyze point (e.g., "P: 1" or "P1" or "A: 3")
                 point_result = self._analyze_point_only(point_roi, f"{name}_point")
                 if point_result[0]:
                     point = point_result[0]
                     diag_imgs.update(point_result[1])
                     
-                    # Analyze direction
                     dir_result = self._analyze_direction_only(dir_roi, f"{name}_dir")
                     if dir_result[0]:
                         direction = dir_result[0]
                     diag_imgs.update(dir_result[1])
                     break
             
-            # If split approach failed, try full ROI
             if not point:
                 full_result = self._analyze_full_point_roi(roi, name)
                 point = full_result[0]
@@ -781,7 +765,6 @@ class ScreenMonitor:
         return point, direction, diag_imgs
 
     def _analyze_point_only(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
-        """Analyze just the point part of the ROI."""
         diag_imgs = {}
         
         configs = [
@@ -799,33 +782,27 @@ class ScreenMonitor:
             
             diag_imgs[f'{name}_attempt_{i}'] = preprocessed
             
-            for psm in [7, 8, 13]:  # Single line, single word, raw line
+            for psm in [7, 8, 13]:
                 text = self._run_ocr_with_config(preprocessed, psm=psm, whitelist=whitelist, load_dawgs=False)
                 
-                # Pattern: Letter followed by colon and number (e.g., "P: 1", "A: 3")
                 match = re.search(r'([A-Za-z])\s*[:\s]\s*(\d+)', text)
                 if match:
                     point = f"{match.group(1).upper()}{match.group(2)}"
-                    if self.verbose_logging_enabled:
-                        logger.debug(f"Point OCR success: '{point}' from '{text}'")
                     return point, diag_imgs
                 
-                # Pattern: Just letter and number (e.g., "P1")
                 match = re.search(r'([A-Za-z])(\d+)', text)
                 if match:
                     point = f"{match.group(1).upper()}{match.group(2)}"
                     return point, diag_imgs
                 
-                # Pattern: Just a number (point letter might be label outside ROI)
                 match = re.search(r'^[\s:]*(\d+)\s*$', text)
                 if match:
-                    point = f"P{match.group(1)}"  # Assume P if no letter
+                    point = f"P{match.group(1)}"
                     return point, diag_imgs
         
         return None, diag_imgs
 
     def _analyze_direction_only(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
-        """Analyze just the direction part of the ROI."""
         diag_imgs = {}
         
         configs = [
@@ -842,23 +819,19 @@ class ScreenMonitor:
             
             diag_imgs[f'{name}_attempt_{i}'] = preprocessed
             
-            for psm in [10, 8, 13]:  # Single char, single word, raw line
+            for psm in [10, 8, 13]:
                 text = self._run_ocr_with_config(preprocessed, psm=psm, whitelist=whitelist, load_dawgs=False)
                 
-                # Pattern: +/- followed by X/Y/Z
                 match = re.search(r'([+\-])?\s*([XYZxyz])', text)
                 if match:
                     sign = match.group(1) if match.group(1) else '+'
                     axis = match.group(2).upper()
                     direction = f"{sign}{axis}"
-                    if self.verbose_logging_enabled:
-                        logger.debug(f"Direction OCR success: '{direction}' from '{text}'")
                     return direction, diag_imgs
         
         return None, diag_imgs
 
     def _analyze_full_point_roi(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Optional[str], Dict[str, np.ndarray]]:
-        """Analyze the full ROI for both point and direction when split fails."""
         diag_imgs = {}
         point, direction = None, None
         
@@ -871,7 +844,6 @@ class ScreenMonitor:
         whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789+-XYZxyz '
         text = self._run_ocr_with_config(preprocessed, psm=7, whitelist=whitelist, load_dawgs=False)
         
-        # Try to parse full string like "P: 1 +Z" or "A:3-X"
         full_match = re.search(r'([A-Za-z])\s*[:\s]\s*(\d+)\s*([+\-]?\s*[XYZxyz])?', text)
         if full_match:
             point = f"{full_match.group(1).upper()}{full_match.group(2)}"
@@ -906,7 +878,6 @@ class ScreenMonitor:
         return True
 
     def _apply_lowpass_filter(self, signal: np.ndarray) -> np.ndarray:
-        """Apply zero-phase Butterworth lowpass filter."""
         if len(signal) < 15:
             return signal.copy()
         
@@ -922,14 +893,12 @@ class ScreenMonitor:
             return signal.copy()
 
     def _calculate_exceedances(self, residual: np.ndarray, threshold: float) -> Tuple[int, float]:
-        """Count samples where |residual| exceeds threshold."""
         exceedance_mask = np.abs(residual) > threshold
         count = np.sum(exceedance_mask)
         ratio = count / len(residual) if len(residual) > 0 else 0.0
         return int(count), ratio
 
     def _analyze_wave_pattern(self, roi: np.ndarray, region: MonitoringRegion) -> Optional[WaveAnalysisResult]:
-        """Analyze wave pattern with both FFT and Lowpass methods."""
         if roi.size == 0:
             return None
             
@@ -960,7 +929,6 @@ class ScreenMonitor:
         if signal_pixels.size < 2:
             return None
         
-        # FFT Analysis
         N = len(signal_pixels)
         detrended_pixels = signal_pixels - np.mean(signal_pixels)
         yf = rfft(detrended_pixels)
@@ -976,14 +944,12 @@ class ScreenMonitor:
                 energy_ratio = high_freq_energy / total_energy
             is_hf = energy_ratio > self.app_config.fft_energy_ratio_threshold
         
-        # Convert to physical units
         y_range = region.y_axis_max - region.y_axis_min
         signal_physical = region.y_axis_min + (signal_pixels / height) * y_range
         
         signal_mean = np.mean(signal_physical)
         signal_detrended = signal_physical - signal_mean
         
-        # Lowpass Analysis
         filtered_detrended = self._apply_lowpass_filter(signal_detrended)
         residual_physical = signal_detrended - filtered_detrended
         filtered_physical = filtered_detrended + signal_mean
@@ -1013,7 +979,7 @@ class ScreenMonitor:
         )
 
     # =========================================================================
-    # VISUAL LOGGING (Organized into folders)
+    # VISUAL LOGGING - THREAD-SAFE (Using Figure directly, not pyplot)
     # =========================================================================
 
     def _create_visual_logs(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
@@ -1025,7 +991,6 @@ class ScreenMonitor:
                          f"{frame_result.points_info.hammer_dir} R: {frame_result.points_info.response_point}"
                          f"{frame_result.points_info.response_dir} | Overload: {frame_result.overload_text}")
 
-            # Wave ROI Screenshots -> image_logs/ROIs/
             if self.image_log_options.include_screenshot:
                 for r_name, r_img in all_rois.items():
                     try:
@@ -1037,36 +1002,29 @@ class ScreenMonitor:
                     except Exception as e:
                         logger.error(f"Failed to save ROI image for '{r_name}': {e}")
 
-            # Color Masks -> image_logs/ColorMasks/
             if self.image_log_options.include_color_filter: 
                 cv2.imwrite(f"image_logs/ColorMasks/{base_filename}_mask.jpg", wave_result.color_mask)
             
-            # Signal Plots -> image_logs/Signals/
             if self.image_log_options.include_signal_plot:
-                self._create_signal_plot(wave_result, region, title_info, 
-                                        f"image_logs/Signals/{base_filename}_signal.png")
+                self._create_signal_plot_safe(wave_result, region, title_info, 
+                                             f"image_logs/Signals/{base_filename}_signal.png")
             
-            # FFT Plots -> image_logs/FFT/
             if self.image_log_options.include_fft_plot:
-                self._create_fft_plot(wave_result, region, title_info, 
-                                     f"image_logs/FFT/{base_filename}_fft.png")
+                self._create_fft_plot_safe(wave_result, region, title_info, 
+                                          f"image_logs/FFT/{base_filename}_fft.png")
             
-            # Lowpass Plots -> image_logs/Lowpass/
             if self.image_log_options.include_lowpass_plot:
-                self._create_lowpass_comparison_plot(wave_result, region, title_info, 
-                                                     f"image_logs/Lowpass/{base_filename}_lowpass.png")
+                self._create_lowpass_comparison_plot_safe(wave_result, region, title_info, 
+                                                         f"image_logs/Lowpass/{base_filename}_lowpass.png")
             
-            # Residual Plots -> image_logs/Residual/
             if self.image_log_options.include_residual_plot:
-                self._create_residual_plot(wave_result, region, title_info, 
-                                          f"image_logs/Residual/{base_filename}_residual.png")
+                self._create_residual_plot_safe(wave_result, region, title_info, 
+                                               f"image_logs/Residual/{base_filename}_residual.png")
             
-            # Summary Charts -> image_logs/Summary/
             if self.image_log_options.include_summary_chart and self.current_run in self.run_history:
-                self._create_run_summary_chart(self.run_history[self.current_run], 
-                                               f"image_logs/Summary/{base_filename}_summary.png")
+                self._create_run_summary_chart_safe(self.run_history[self.current_run], 
+                                                    f"image_logs/Summary/{base_filename}_summary.png")
             
-            # OCR Diagnostic Images -> image_logs/OCRs/
             if self.image_log_options.include_ocr_images and frame_result.ocr_images:
                 for ocr_name, ocr_img in frame_result.ocr_images.items():
                     if ocr_img is not None and ocr_img.size > 0:
@@ -1075,174 +1033,226 @@ class ScreenMonitor:
         except Exception as e:
             logger.error(f"Failed to create visual logs for {wave_name}: {e}")
 
-    def _create_signal_plot(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
-                           title_info: str, filename: str):
-        fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-        fig.patch.set_facecolor('#1E1E1E')
-        
-        num_points = len(wave_result.signal_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
-        
-        ax.plot(freq_axis, wave_result.signal_physical, color='cyan', linewidth=1.5)
-        ax.set_xlabel('Frequency (Hz)', color='white')
-        ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
-        ax.set_title(f'Reconstructed Signal\n{title_info}', color='white', fontsize=10)
-        ax.set_facecolor('#2E2E2E')
-        ax.tick_params(axis='both', colors='white')
-        ax.grid(True, linestyle='--', alpha=0.3)
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.savefig(filename, facecolor=fig.get_facecolor())
-        plt.close(fig)
-
-    def _create_fft_plot(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
-                        title_info: str, filename: str):
-        fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-        fig.patch.set_facecolor('#1E1E1E')
-        
-        ax.plot(wave_result.fft_freqs, wave_result.fft_mags, color='magenta', linewidth=1)
-        ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
-                  linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
-        ax.set_xlim(0, 0.5)
-        ax.set_xlabel('Normalized Frequency', color='white')
-        ax.set_ylabel('Magnitude (A.U.)', color='white')
-        
-        fft_info = (f'Total E: {wave_result.total_energy:.2e} | '
-                   f'HF E: {wave_result.high_freq_energy:.2e} | '
-                   f'Ratio: {wave_result.energy_ratio:.3e}')
-        classification = "HF (Bad)" if wave_result.is_high_frequency else "LF (Good)"
-        ax.set_title(f'FFT Magnitude Spectrum - {classification}\n{title_info}\n{fft_info}', 
-                    color='white', fontsize=9)
-        
-        ax.set_facecolor('#2E2E2E')
-        ax.tick_params(axis='both', colors='white')
-        ax.legend(facecolor='#2E2E2E', labelcolor='white')
-        ax.grid(True, linestyle='--', alpha=0.3)
-        
-        textstr = f'Threshold: {self.app_config.fft_energy_ratio_threshold:.4f}'
-        props = dict(boxstyle='round', facecolor='#2E2E2E', alpha=0.8, edgecolor='white')
-        ax.text(0.98, 0.97, textstr, transform=ax.transAxes, fontsize=9,
-               verticalalignment='top', horizontalalignment='right', 
-               bbox=props, color='white')
-        
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.savefig(filename, facecolor=fig.get_facecolor())
-        plt.close(fig)
-
-    def _create_lowpass_comparison_plot(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
-                                        title_info: str, filename: str):
-        fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-        fig.patch.set_facecolor('#1E1E1E')
-        
-        if wave_result.signal_physical is None or wave_result.filtered_physical is None:
-            ax.text(0.5, 0.5, 'No lowpass data available', 
-                   transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
+    def _create_signal_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
+                                 title_info: str, filename: str):
+        """Thread-safe signal plot creation using Figure directly."""
+        fig = None
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            
+            fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            num_points = len(wave_result.signal_physical)
+            freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+            
+            ax.plot(freq_axis, wave_result.signal_physical, color='cyan', linewidth=1.5)
+            ax.set_xlabel('Frequency (Hz)', color='white')
+            ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
+            ax.set_title(f'Reconstructed Signal\n{title_info}', color='white', fontsize=10)
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white')
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
-            plt.close(fig)
-            return
-        
-        num_points = len(wave_result.signal_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
-        
-        ax.plot(freq_axis, wave_result.signal_physical, 'w-', linewidth=2, label='Original', alpha=0.9)
-        ax.plot(freq_axis, wave_result.filtered_physical, 'g--', linewidth=1.5, label='Lowpass Filtered')
-        
-        filter_info = f'Cutoff: {self.app_config.lowpass_cutoff:.3f} | Order: {self.app_config.lowpass_filter_order}'
-        ax.set_title(f'Lowpass Filter Comparison (Physical Units)\n{title_info}\n{filter_info}', 
-                    color='white', fontsize=9)
-        ax.set_xlabel('Frequency (Hz)', color='white')
-        ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
-        ax.set_facecolor('#2E2E2E')
-        ax.tick_params(axis='both', colors='white')
-        ax.legend(facecolor='#2E2E2E', labelcolor='white')
-        ax.grid(True, linestyle='--', alpha=0.3)
-        
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.savefig(filename, facecolor=fig.get_facecolor())
-        plt.close(fig)
+        finally:
+            if fig is not None:
+                fig.clf()
+                del fig
+            gc.collect()
 
-    def _create_residual_plot(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
+    def _create_fft_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
                               title_info: str, filename: str):
-        fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-        fig.patch.set_facecolor('#1E1E1E')
-        
-        if wave_result.residual_physical is None:
-            ax.text(0.5, 0.5, 'No residual data available', 
-                   transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
+        """Thread-safe FFT plot creation."""
+        fig = None
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            
+            fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            ax.plot(wave_result.fft_freqs, wave_result.fft_mags, color='magenta', linewidth=1)
+            ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
+                      linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
+            ax.set_xlim(0, 0.5)
+            ax.set_xlabel('Normalized Frequency', color='white')
+            ax.set_ylabel('Magnitude (A.U.)', color='white')
+            
+            fft_info = (f'Total E: {wave_result.total_energy:.2e} | '
+                       f'HF E: {wave_result.high_freq_energy:.2e} | '
+                       f'Ratio: {wave_result.energy_ratio:.3e}')
+            classification = "HF (Bad)" if wave_result.is_high_frequency else "LF (Good)"
+            ax.set_title(f'FFT Magnitude Spectrum - {classification}\n{title_info}\n{fft_info}', 
+                        color='white', fontsize=9)
+            
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white')
+            ax.legend(facecolor='#2E2E2E', labelcolor='white')
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
-            plt.close(fig)
-            return
-        
-        num_points = len(wave_result.residual_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
-        threshold = self.app_config.residual_threshold
-        
-        ax.plot(freq_axis, wave_result.residual_physical, 'c-', linewidth=1, label='Residual (HF Content)')
-        ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
-        ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5, 
-                  label=f'Threshold (±{threshold} {region.y_axis_unit})')
-        ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
-        
-        exceedances = np.abs(wave_result.residual_physical) > threshold
-        if np.any(exceedances):
-            ax.scatter(freq_axis[exceedances], wave_result.residual_physical[exceedances], 
-                      c='red', s=15, zorder=5, alpha=0.7)
-        
-        classification = "BAD HIT" if wave_result.lowpass_is_bad_hit else "GOOD HIT"
-        residual_info = (f'Exceedances: {wave_result.exceedance_count} ({wave_result.exceedance_ratio:.1%}) | '
-                        f'Threshold: {self.app_config.exceedance_ratio_threshold:.1%} | {classification}')
-        ax.set_title(f'Residual Analysis (Physical Units)\n{title_info}\n{residual_info}', 
-                    color='white', fontsize=9)
-        ax.set_xlabel('Frequency (Hz)', color='white')
-        ax.set_ylabel(f'Residual ({region.y_axis_unit})', color='white')
-        ax.set_facecolor('#2E2E2E')
-        ax.tick_params(axis='both', colors='white')
-        ax.legend(facecolor='#2E2E2E', labelcolor='white', loc='upper right')
-        ax.grid(True, linestyle='--', alpha=0.3)
-        
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.savefig(filename, facecolor=fig.get_facecolor())
-        plt.close(fig)
+        finally:
+            if fig is not None:
+                fig.clf()
+                del fig
+            gc.collect()
 
-    def _create_run_summary_chart(self, hit_data: Dict, filename: str):
+    def _create_lowpass_comparison_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
+                                             title_info: str, filename: str):
+        """Thread-safe lowpass comparison plot creation."""
+        fig = None
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            
+            fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            if wave_result.signal_physical is None or wave_result.filtered_physical is None:
+                ax.text(0.5, 0.5, 'No lowpass data available', 
+                       transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
+                fig.savefig(filename, facecolor=fig.get_facecolor())
+                return
+            
+            num_points = len(wave_result.signal_physical)
+            freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+            
+            ax.plot(freq_axis, wave_result.signal_physical, 'w-', linewidth=2, label='Original', alpha=0.9)
+            ax.plot(freq_axis, wave_result.filtered_physical, 'g--', linewidth=1.5, label='Lowpass Filtered')
+            
+            filter_info = f'Cutoff: {self.app_config.lowpass_cutoff:.3f} | Order: {self.app_config.lowpass_filter_order}'
+            ax.set_title(f'Lowpass Filter Comparison\n{title_info}\n{filter_info}', 
+                        color='white', fontsize=9)
+            ax.set_xlabel('Frequency (Hz)', color='white')
+            ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white')
+            ax.legend(facecolor='#2E2E2E', labelcolor='white')
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            fig.tight_layout()
+            fig.savefig(filename, facecolor=fig.get_facecolor())
+        finally:
+            if fig is not None:
+                fig.clf()
+                del fig
+            gc.collect()
+
+    def _create_residual_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
+                                   title_info: str, filename: str):
+        """Thread-safe residual plot creation."""
+        fig = None
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            
+            fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            if wave_result.residual_physical is None:
+                ax.text(0.5, 0.5, 'No residual data available', 
+                       transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
+                fig.savefig(filename, facecolor=fig.get_facecolor())
+                return
+            
+            num_points = len(wave_result.residual_physical)
+            freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+            threshold = self.app_config.residual_threshold
+            
+            ax.plot(freq_axis, wave_result.residual_physical, 'c-', linewidth=1, label='Residual (HF Content)')
+            ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
+            ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5, 
+                      label=f'Threshold (±{threshold} {region.y_axis_unit})')
+            ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
+            
+            exceedances = np.abs(wave_result.residual_physical) > threshold
+            if np.any(exceedances):
+                ax.scatter(freq_axis[exceedances], wave_result.residual_physical[exceedances], 
+                          c='red', s=15, zorder=5, alpha=0.7)
+            
+            classification = "BAD HIT" if wave_result.lowpass_is_bad_hit else "GOOD HIT"
+            residual_info = (f'Exceedances: {wave_result.exceedance_count} ({wave_result.exceedance_ratio:.1%}) | '
+                            f'Threshold: {self.app_config.exceedance_ratio_threshold:.1%} | {classification}')
+            ax.set_title(f'Residual Analysis\n{title_info}\n{residual_info}', 
+                        color='white', fontsize=9)
+            ax.set_xlabel('Frequency (Hz)', color='white')
+            ax.set_ylabel(f'Residual ({region.y_axis_unit})', color='white')
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white')
+            ax.legend(facecolor='#2E2E2E', labelcolor='white', loc='upper right')
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            fig.tight_layout()
+            fig.savefig(filename, facecolor=fig.get_facecolor())
+        finally:
+            if fig is not None:
+                fig.clf()
+                del fig
+            gc.collect()
+
+    def _create_run_summary_chart_safe(self, hit_data: Dict, filename: str):
+        """Thread-safe run summary chart creation."""
         if not hit_data:
             return
+        
+        fig = None
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            import matplotlib.cm as cm
             
-        fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
-        fig.patch.set_facecolor('#1E1E1E')
-        
-        hits = list(hit_data.keys())
-        values = [hit_data[h]['exceedance_count'] for h in hits]
-        
-        bars = ax.bar(range(len(hits)), values, edgecolor='white', linewidth=0.5)
-        
-        cmap = plt.cm.jet
-        vmin, vmax = min(values), max(values)
-        if vmin == vmax:
-            vmin, vmax = vmin - 1, vmax + 1
-        
-        for bar, val in zip(bars, values):
-            normalized = (val - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-            bar.set_color(cmap(normalized))
-        
-        ax.set_xticks(range(len(hits)))
-        ax.set_xticklabels(hits, rotation=45, ha='right', fontsize=8, color='white')
-        ax.set_xlabel('Hit (Point Combination)', color='white')
-        ax.set_ylabel('Exceedances (Values Outside Range)', color='white')
-        ax.set_title(f'Run Summary - Exceedance Counts\n{self.current_run}', color='white', fontsize=11)
-        ax.set_facecolor('#2E2E2E')
-        ax.tick_params(axis='both', colors='white')
-        ax.grid(True, linestyle='--', alpha=0.3, axis='y')
-        
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
-        sm.set_array([])
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label('Exceedance Count', color='white')
-        cbar.ax.yaxis.set_tick_params(color='white')
-        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-        
-        fig.tight_layout()
-        fig.savefig(filename, facecolor=fig.get_facecolor())
-        plt.close(fig)
+            fig = Figure(figsize=(12, 6), dpi=150, facecolor='#1E1E1E')
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            hits = list(hit_data.keys())
+            values = [hit_data[h]['exceedance_count'] for h in hits]
+            
+            bars = ax.bar(range(len(hits)), values, edgecolor='white', linewidth=0.5)
+            
+            cmap = cm.jet
+            vmin, vmax = min(values), max(values)
+            if vmin == vmax:
+                vmin, vmax = vmin - 1, vmax + 1
+            
+            for bar, val in zip(bars, values):
+                normalized = (val - vmin) / (vmax - vmin) if vmax > vmin else 0.5
+                bar.set_color(cmap(normalized))
+            
+            ax.set_xticks(range(len(hits)))
+            ax.set_xticklabels(hits, rotation=45, ha='right', fontsize=8, color='white')
+            ax.set_xlabel('Hit (Point Combination)', color='white')
+            ax.set_ylabel('Exceedances', color='white')
+            ax.set_title(f'Run Summary - Exceedance Counts\n{self.current_run}', color='white', fontsize=11)
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white')
+            ax.grid(True, linestyle='--', alpha=0.3, axis='y')
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            fig.tight_layout()
+            fig.savefig(filename, facecolor=fig.get_facecolor())
+        finally:
+            if fig is not None:
+                fig.clf()
+                del fig
+            gc.collect()
     
     # =========================================================================
     # DATA FILE LOGGING
@@ -1445,29 +1455,24 @@ class ConfigToolWindow(tk.Toplevel):
         self.destroy()
 
     def _setup_gui(self):
-        # Toolbar
         toolbar = ttk.Frame(self, padding=5)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         ttk.Button(toolbar, text="Save Config", command=self._save_config).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Load Config", command=self._load_config).pack(side=tk.LEFT, padx=2)
         
-        # Main frame
         main_frame = ttk.Frame(self, padding=5)
         main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        # Canvas frame (left)
         canvas_frame = ttk.LabelFrame(main_frame, text="Screenshot Preview")
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.canvas = tk.Canvas(canvas_frame, bg="black")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Right panel with fixed width and both scrollbars
         right_outer_frame = ttk.Frame(main_frame, width=550)
         right_outer_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
         right_outer_frame.pack_propagate(False)
         right_outer_frame.grid_propagate(False)
         
-        # Create canvas for scrolling (both vertical and horizontal)
         self.right_canvas = tk.Canvas(right_outer_frame, highlightthickness=0, width=380)
         v_scrollbar = ttk.Scrollbar(right_outer_frame, orient=tk.VERTICAL, command=self.right_canvas.yview)
         h_scrollbar = ttk.Scrollbar(right_outer_frame, orient=tk.HORIZONTAL, command=self.right_canvas.xview)
@@ -1481,35 +1486,27 @@ class ConfigToolWindow(tk.Toplevel):
         self.right_canvas.create_window((0, 0), window=self.right_scrollable_frame, anchor="nw")
         self.right_canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
         
-        # Enable mouse wheel scrolling
         self.right_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         
         v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Build right panel content inside scrollable frame
         self._build_right_panel_content(self.right_scrollable_frame)
         
-        # Canvas bindings
         self.canvas.bind("<Button-1>", self._on_canvas_click)
         self.canvas.bind("<B1-Motion>", self._update_selection)
         self.canvas.bind("<ButtonRelease-1>", self._end_selection)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
     
     def _on_mousewheel(self, event):
-        """Handle mouse wheel scrolling for the right panel."""
         self.right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
     
     def _build_right_panel_content(self, parent):
-        """Build all the controls in the scrollable right panel."""
-        
-        # Capture button
         capture_frame = ttk.LabelFrame(parent, text="Capture")
         capture_frame.pack(fill=tk.X, pady=5, padx=5)
         ttk.Button(capture_frame, text="Take Screenshot", command=self._take_screenshot).pack(pady=5, padx=5, fill=tk.X)
         
-        # Region list
         list_frame = ttk.LabelFrame(parent, text="Defined Regions")
         list_frame.pack(fill=tk.X, pady=5, padx=5)
         
@@ -1523,7 +1520,6 @@ class ConfigToolWindow(tk.Toplevel):
         self.region_listbox.config(yscrollcommand=list_scroll.set)
         self.region_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
         
-        # Region Editor
         editor_frame = ttk.LabelFrame(parent, text="Region Editor")
         editor_frame.pack(fill=tk.X, pady=5, padx=5)
         
@@ -1535,7 +1531,6 @@ class ConfigToolWindow(tk.Toplevel):
             'resp_node': tk.IntVar(), 'resp_dof': tk.IntVar(), 'ref_node': tk.IntVar(), 'ref_dof': tk.IntVar()
         }
         
-        # Name and type row
         f1 = ttk.Frame(editor_frame)
         f1.pack(fill=tk.X, pady=2, padx=5)
         ttk.Label(f1, text="Name:").pack(side=tk.LEFT)
@@ -1545,7 +1540,6 @@ class ConfigToolWindow(tk.Toplevel):
                      values=['wave', 'status', 'overload', 'run', 'hammer', 'response'], 
                      state='readonly', width=10).pack(side=tk.LEFT, padx=2)
         
-        # Geometry row
         f_geom = ttk.Frame(editor_frame)
         f_geom.pack(fill=tk.X, pady=2, padx=5)
         ttk.Label(f_geom, text="x:").pack(side=tk.LEFT)
@@ -1557,7 +1551,6 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Label(f_geom, text="h:").pack(side=tk.LEFT)
         ttk.Entry(f_geom, textvariable=self.editor_vars['height'], width=5).pack(side=tk.LEFT, padx=2)
 
-        # Physical scaling
         f_scale = ttk.LabelFrame(editor_frame, text="Physical Axis Scaling (wave)")
         f_scale.pack(fill=tk.X, pady=5, padx=5)
         
@@ -1577,14 +1570,12 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Label(g2, text="Unit:").pack(side=tk.LEFT, padx=(5,0))
         ttk.Entry(g2, textvariable=self.editor_vars['y_axis_unit'], width=6).pack(side=tk.LEFT, padx=2)
         
-        # Buttons
         f_buttons = ttk.Frame(editor_frame)
         f_buttons.pack(fill=tk.X, pady=5, padx=5)
         ttk.Checkbutton(f_buttons, text="Enabled", variable=self.editor_vars['enabled']).pack(side=tk.LEFT)
         ttk.Button(f_buttons, text="Update", command=self._update_region_from_editor).pack(side=tk.LEFT, padx=5)
         ttk.Button(f_buttons, text="Delete", command=self._delete_selected_region).pack(side=tk.LEFT)
         
-        # Analysis Parameters
         params_frame = ttk.LabelFrame(parent, text="Analysis Parameters")
         params_frame.pack(fill=tk.X, pady=5, padx=5)
         
@@ -1597,7 +1588,6 @@ class ConfigToolWindow(tk.Toplevel):
             'exceedance_ratio_threshold': tk.DoubleVar(value=self.app_config.exceedance_ratio_threshold)
         }
         
-        # FFT parameters
         g_fft = ttk.LabelFrame(params_frame, text="FFT Method")
         g_fft.pack(fill=tk.X, pady=2, padx=5)
         
@@ -1610,7 +1600,6 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Spinbox(fft_row, from_=0.0, to=1.0, increment=0.001, 
                    textvariable=self.param_vars['fft_energy_ratio_threshold'], width=7).pack(side=tk.LEFT, padx=2)
         
-        # Lowpass parameters
         g_lp = ttk.LabelFrame(params_frame, text="Lowpass Residual Method")
         g_lp.pack(fill=tk.X, pady=2, padx=5)
         
@@ -1833,13 +1822,13 @@ class GraphViewerFrame(ttk.LabelFrame):
     """Embedded matplotlib graph viewer with hit and plot type navigation."""
     
     PLOT_TYPES = ['Signal', 'FFT', 'Lowpass Comparison', 'Residual Analysis', 'Run Summary']
-    MAX_HISTORY = 50
+    MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
     
     def __init__(self, parent):
         super().__init__(parent, text="Graph Viewer")
         self.current_plot_index = 0
         self.current_hit_index = -1
-        self.hit_history: List[Tuple] = []
+        self.hit_history: List[LightweightHitData] = []
         self.run_history = {}
         self.app_config = None
         
@@ -1852,19 +1841,19 @@ class GraphViewerFrame(ttk.LabelFrame):
         hit_nav_frame = ttk.LabelFrame(nav_frame, text="Hit")
         hit_nav_frame.pack(side=tk.LEFT, padx=5)
         
-        self.prev_hit_btn = ttk.Button(hit_nav_frame, text="◀◀", command=self._prev_hit, width=4)
+        self.prev_hit_btn = ttk.Button(hit_nav_frame, text="<<", command=self._prev_hit, width=4)
         self.prev_hit_btn.pack(side=tk.LEFT, padx=2)
         
         self.hit_label = ttk.Label(hit_nav_frame, text="--/--", width=12, anchor=tk.CENTER)
         self.hit_label.pack(side=tk.LEFT, padx=5)
         
-        self.next_hit_btn = ttk.Button(hit_nav_frame, text="▶▶", command=self._next_hit, width=4)
+        self.next_hit_btn = ttk.Button(hit_nav_frame, text=">>", command=self._next_hit, width=4)
         self.next_hit_btn.pack(side=tk.LEFT, padx=2)
         
         plot_nav_frame = ttk.LabelFrame(nav_frame, text="Plot Type")
         plot_nav_frame.pack(side=tk.LEFT, padx=10)
         
-        self.prev_plot_btn = ttk.Button(plot_nav_frame, text="◀", command=self._prev_plot, width=3)
+        self.prev_plot_btn = ttk.Button(plot_nav_frame, text="<", command=self._prev_plot, width=3)
         self.prev_plot_btn.pack(side=tk.LEFT, padx=2)
         
         self.plot_type_var = tk.StringVar(value=self.PLOT_TYPES[0])
@@ -1873,7 +1862,7 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.plot_selector.pack(side=tk.LEFT, padx=2)
         self.plot_selector.bind("<<ComboboxSelected>>", self._on_plot_selected)
         
-        self.next_plot_btn = ttk.Button(plot_nav_frame, text="▶", command=self._next_plot, width=3)
+        self.next_plot_btn = ttk.Button(plot_nav_frame, text=">", command=self._next_plot, width=3)
         self.next_plot_btn.pack(side=tk.LEFT, padx=2)
         
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
@@ -1930,20 +1919,22 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.next_hit_btn.config(state=tk.NORMAL if self.current_hit_index < total - 1 else tk.DISABLED)
         
         if total > 0 and 0 <= self.current_hit_index < total:
-            _, frame_result, _, hit_key = self.hit_history[self.current_hit_index]
-            self.hit_info_label.config(text=f"Hit: {hit_key}")
+            hit_data = self.hit_history[self.current_hit_index]
+            self.hit_info_label.config(text=f"Hit: {hit_data.hit_key}")
         else:
             self.hit_info_label.config(text="No data")
         
-    def update_data(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
-                    region: MonitoringRegion, hit_key: str, run_history: Dict, app_config: AppConfig):
-        self.hit_history.append((wave_result, frame_result, region, hit_key))
+    def update_data(self, lightweight_data: LightweightHitData, run_history: Dict, app_config: AppConfig = None):
+        """Update with lightweight hit data."""
+        self.hit_history.append(lightweight_data)
         
+        # Enforce history limit
         if len(self.hit_history) > self.MAX_HISTORY:
             self.hit_history = self.hit_history[-self.MAX_HISTORY:]
         
         self.run_history = run_history
-        self.app_config = app_config
+        if app_config:
+            self.app_config = app_config
         
         self.current_hit_index = len(self.hit_history) - 1
         
@@ -1957,7 +1948,7 @@ class GraphViewerFrame(ttk.LabelFrame):
         if self.current_hit_index >= len(self.hit_history):
             self.current_hit_index = len(self.hit_history) - 1
             
-        wave_result, frame_result, region, hit_key = self.hit_history[self.current_hit_index]
+        hit_data = self.hit_history[self.current_hit_index]
         
         self.ax.clear()
         self.ax.set_facecolor('#2E2E2E')
@@ -1967,40 +1958,44 @@ class GraphViewerFrame(ttk.LabelFrame):
         
         try:
             if plot_type == 'Signal':
-                self._plot_signal(wave_result, region, hit_key)
+                self._plot_signal(hit_data)
             elif plot_type == 'FFT':
-                self._plot_fft(wave_result, hit_key)
+                self._plot_fft(hit_data)
             elif plot_type == 'Lowpass Comparison':
-                self._plot_lowpass_comparison(wave_result, region, hit_key)
+                self._plot_lowpass_comparison(hit_data)
             elif plot_type == 'Residual Analysis':
-                self._plot_residual(wave_result, region, hit_key)
+                self._plot_residual(hit_data)
             elif plot_type == 'Run Summary':
-                self._plot_run_summary(frame_result)
+                self._plot_run_summary(hit_data)
+                
+            for spine in self.ax.spines.values():
+                spine.set_color('white')
+                
         except Exception as e:
             logger.error(f"Error plotting {plot_type}: {e}")
             self.ax.text(0.5, 0.5, f'Error: {str(e)[:50]}', 
                         transform=self.ax.transAxes, ha='center', va='center', color='red')
             
         self.figure.tight_layout()
-        self.canvas.draw()
+        self.canvas.draw_idle()  # Use draw_idle instead of draw for efficiency
         
-    def _plot_signal(self, wave_result, region, hit_key):
-        if wave_result.signal_physical is None:
+    def _plot_signal(self, hit_data: LightweightHitData):
+        if hit_data.signal_physical is None or len(hit_data.signal_physical) == 0:
             self.ax.text(0.5, 0.5, 'No signal data', transform=self.ax.transAxes, 
                         ha='center', va='center', color='white')
             return
             
-        num_points = len(wave_result.signal_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+        num_points = len(hit_data.signal_physical)
+        freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
         
-        self.ax.plot(freq_axis, wave_result.signal_physical, color='cyan', linewidth=1.5)
+        self.ax.plot(freq_axis, hit_data.signal_physical, color='cyan', linewidth=1.5)
         self.ax.set_xlabel('Frequency (Hz)', color='white')
-        self.ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
-        self.ax.set_title(f'Reconstructed Signal - {hit_key}', color='white')
+        self.ax.set_ylabel(f'Amplitude ({hit_data.y_axis_unit})', color='white')
+        self.ax.set_title(f'Reconstructed Signal - {hit_data.hit_key}', color='white')
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
-    def _plot_fft(self, wave_result, hit_key):
-        self.ax.plot(wave_result.fft_freqs, wave_result.fft_mags, color='magenta', linewidth=1)
+    def _plot_fft(self, hit_data: LightweightHitData):
+        self.ax.plot(hit_data.fft_freqs, hit_data.fft_mags, color='magenta', linewidth=1)
         
         if self.app_config:
             self.ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
@@ -2010,88 +2005,88 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.ax.set_xlabel('Normalized Frequency', color='white')
         self.ax.set_ylabel('Magnitude', color='white')
         
-        classification = "HF (Bad)" if wave_result.is_high_frequency else "LF (Good)"
-        self.ax.set_title(f'FFT - {hit_key} - Ratio: {wave_result.energy_ratio:.3e} - {classification}', 
+        classification = "HF (Bad)" if hit_data.is_high_frequency else "LF (Good)"
+        self.ax.set_title(f'FFT - {hit_data.hit_key} - Ratio: {hit_data.energy_ratio:.3e} - {classification}', 
                          color='white', fontsize=10)
         self.ax.legend(facecolor='#2E2E2E', labelcolor='white')
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
-    def _plot_lowpass_comparison(self, wave_result, region, hit_key):
-        if wave_result.signal_physical is None or wave_result.filtered_physical is None:
+    def _plot_lowpass_comparison(self, hit_data: LightweightHitData):
+        if hit_data.signal_physical is None or hit_data.filtered_physical is None:
             self.ax.text(0.5, 0.5, 'No lowpass data available', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
             
-        num_points = len(wave_result.signal_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+        num_points = len(hit_data.signal_physical)
+        freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
         
-        self.ax.plot(freq_axis, wave_result.signal_physical, 'w-', linewidth=1.5, label='Original', alpha=0.9)
-        self.ax.plot(freq_axis, wave_result.filtered_physical, 'g--', linewidth=1.2, label='Lowpass Filtered')
+        self.ax.plot(freq_axis, hit_data.signal_physical, 'w-', linewidth=1.5, label='Original', alpha=0.9)
+        self.ax.plot(freq_axis, hit_data.filtered_physical, 'g--', linewidth=1.2, label='Lowpass Filtered')
         
         self.ax.set_xlabel('Frequency (Hz)', color='white')
-        self.ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
+        self.ax.set_ylabel(f'Amplitude ({hit_data.y_axis_unit})', color='white')
         
         if self.app_config:
-            title = f'Lowpass - {hit_key} - Cutoff: {self.app_config.lowpass_cutoff:.3f}'
+            title = f'Lowpass - {hit_data.hit_key} - Cutoff: {self.app_config.lowpass_cutoff:.3f}'
         else:
-            title = f'Lowpass Comparison - {hit_key}'
+            title = f'Lowpass Comparison - {hit_data.hit_key}'
         self.ax.set_title(title, color='white', fontsize=10)
         self.ax.legend(facecolor='#2E2E2E', labelcolor='white')
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
-    def _plot_residual(self, wave_result, region, hit_key):
-        if wave_result.residual_physical is None:
+    def _plot_residual(self, hit_data: LightweightHitData):
+        if hit_data.residual_physical is None:
             self.ax.text(0.5, 0.5, 'No residual data available', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
             
-        num_points = len(wave_result.residual_physical)
-        freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
+        num_points = len(hit_data.residual_physical)
+        freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
         
         if self.app_config:
             threshold = self.app_config.residual_threshold
         else:
             threshold = 0.005
         
-        self.ax.plot(freq_axis, wave_result.residual_physical, 'c-', linewidth=1, label='Residual')
+        self.ax.plot(freq_axis, hit_data.residual_physical, 'c-', linewidth=1, label='Residual')
         self.ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
         self.ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.2, label=f'±{threshold}')
         self.ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.2)
         
-        exceedances = np.abs(wave_result.residual_physical) > threshold
+        exceedances = np.abs(hit_data.residual_physical) > threshold
         if np.any(exceedances):
-            self.ax.scatter(freq_axis[exceedances], wave_result.residual_physical[exceedances], 
+            self.ax.scatter(freq_axis[exceedances], hit_data.residual_physical[exceedances], 
                           c='red', s=12, zorder=5, alpha=0.7)
         
         self.ax.set_xlabel('Frequency (Hz)', color='white')
-        self.ax.set_ylabel(f'Residual ({region.y_axis_unit})', color='white')
-        classification = "BAD" if wave_result.lowpass_is_bad_hit else "GOOD"
-        self.ax.set_title(f'Residual - {hit_key} - Exc: {wave_result.exceedance_count} ({wave_result.exceedance_ratio:.1%}) - {classification}', 
+        self.ax.set_ylabel(f'Residual ({hit_data.y_axis_unit})', color='white')
+        classification = "BAD" if hit_data.lowpass_is_bad_hit else "GOOD"
+        self.ax.set_title(f'Residual - {hit_data.hit_key} - Exc: {hit_data.exceedance_count} ({hit_data.exceedance_ratio:.1%}) - {classification}', 
                          color='white', fontsize=10)
         self.ax.legend(facecolor='#2E2E2E', labelcolor='white', loc='upper right')
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
-    def _plot_run_summary(self, frame_result):
+    def _plot_run_summary(self, hit_data: LightweightHitData):
         if not self.run_history:
             self.ax.text(0.5, 0.5, 'No run history available', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
             
-        current_run = frame_result.points_info.run if frame_result else "Run 1"
+        current_run = hit_data.run
         if current_run in self.run_history:
-            hit_data = self.run_history[current_run]
+            run_data = self.run_history[current_run]
         else:
-            hit_data = {}
-            for run_data in self.run_history.values():
-                hit_data.update(run_data)
+            run_data = {}
+            for rd in self.run_history.values():
+                run_data.update(rd)
         
-        if not hit_data:
+        if not run_data:
             self.ax.text(0.5, 0.5, 'No hits recorded yet', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
             
-        hits = list(hit_data.keys())
-        values = [hit_data[h]['exceedance_count'] for h in hits]
+        hits = list(run_data.keys())
+        values = [run_data[h]['exceedance_count'] for h in hits]
         
         bars = self.ax.bar(range(len(hits)), values, edgecolor='white', linewidth=0.5)
         
@@ -2120,9 +2115,10 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='both', colors='white')
         self.ax.set_title('Waiting for data...', color='white')
-        self.canvas.draw()
+        self.canvas.draw_idle()
         
         self._update_navigation_state()
+        gc.collect()
 
 
 # --- 6. MAIN GUI ---
@@ -2171,7 +2167,6 @@ class MonitorControlGUI:
         frame = ttk.Frame(self.root, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        # Configuration frame
         config_frame = ttk.LabelFrame(frame, text="Configuration")
         config_frame.pack(fill=tk.X, pady=5)
         ttk.Entry(config_frame, textvariable=self.config_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
@@ -2180,7 +2175,6 @@ class MonitorControlGUI:
         self.edit_button = ttk.Button(config_frame, text="Edit Config...", command=self._launch_config_tool)
         self.edit_button.pack(side=tk.LEFT, padx=5)
         
-        # Live feedback frame
         feedback_frame = ttk.LabelFrame(frame, text="Live Analysis Feedback")
         feedback_frame.pack(fill=tk.X, pady=5)
         
@@ -2202,15 +2196,12 @@ class MonitorControlGUI:
         ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=1, column=3, columnspan=2, sticky=tk.W, padx=5)
         feedback_frame.columnconfigure(3, weight=1)
         
-        # Graph Viewer
         self.graph_viewer = GraphViewerFrame(frame)
         self.graph_viewer.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # Bottom panel
         bottom_panel = ttk.Frame(frame)
         bottom_panel.pack(fill=tk.X, pady=5)
         
-        # Controls
         control_frame = ttk.LabelFrame(bottom_panel, text="Controls")
         control_frame.pack(fill=tk.Y, side=tk.LEFT, pady=5)
         
@@ -2235,11 +2226,9 @@ class MonitorControlGUI:
             self.audio_check.config(state=tk.DISABLED)
             self.audio_feedback_on.set(False)
         
-        # Right panel
         right_panel = ttk.Frame(bottom_panel)
         right_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10)
         
-        # Manual points frame
         self.manual_points_frame = ttk.LabelFrame(right_panel, text="Manual Points of Interest (POI) Entry")
         self.manual_points_frame.pack(fill=tk.X)
         pf = self.manual_points_frame
@@ -2252,11 +2241,9 @@ class MonitorControlGUI:
         ttk.Entry(pf, textvariable=self.manual_points_vars['response_point'], width=6).grid(row=1, column=3)
         ttk.Entry(pf, textvariable=self.manual_points_vars['response_dir'], width=4).grid(row=1, column=4)
         
-        # Logging controls
         logging_controls_frame = ttk.LabelFrame(right_panel, text="Logging")
         logging_controls_frame.pack(fill=tk.X, pady=5)
         
-        # Main logging options
         logging_main_frame = ttk.Frame(logging_controls_frame)
         logging_main_frame.pack(fill=tk.X, side=tk.LEFT, anchor=tk.N, padx=5)
         
@@ -2266,7 +2253,6 @@ class MonitorControlGUI:
         self.img_log_check = ttk.Checkbutton(logging_main_frame, text="Enable Image Logs", variable=self.image_logging_on, command=self._toggle_img_log_options_state)
         self.img_log_check.pack(anchor=tk.W, pady=2)
         
-        # Image log options in three columns
         self.img_log_options_frame = ttk.Frame(logging_main_frame)
         self.img_log_options_frame.pack(fill=tk.X, pady=(5,0))
         
@@ -2277,21 +2263,17 @@ class MonitorControlGUI:
         col3 = ttk.Frame(self.img_log_options_frame)
         col3.pack(side=tk.LEFT, anchor=tk.N)
         
-        # Column 1: Basic images
         ttk.Checkbutton(col1, text="ROI Screenshots", variable=self.log_opt_screenshot).pack(anchor=tk.W)
         ttk.Checkbutton(col1, text="Color Masks", variable=self.log_opt_color_filter).pack(anchor=tk.W)
         ttk.Checkbutton(col1, text="OCR Images", variable=self.log_opt_ocr_images).pack(anchor=tk.W)
         
-        # Column 2: Analysis plots
         ttk.Checkbutton(col2, text="Signal Plot", variable=self.log_opt_signal_plot).pack(anchor=tk.W)
         ttk.Checkbutton(col2, text="FFT Plot", variable=self.log_opt_fft_plot).pack(anchor=tk.W)
         ttk.Checkbutton(col2, text="Summary Chart", variable=self.log_opt_summary_chart).pack(anchor=tk.W)
         
-        # Column 3: Lowpass method
         ttk.Checkbutton(col3, text="Lowpass Plot", variable=self.log_opt_lowpass_plot).pack(anchor=tk.W)
         ttk.Checkbutton(col3, text="Residual Plot", variable=self.log_opt_residual_plot).pack(anchor=tk.W)
         
-        # Data logging
         data_logging_frame = ttk.Frame(logging_controls_frame)
         data_logging_frame.pack(fill=tk.X, side=tk.LEFT, padx=10, anchor=tk.N)
         ttk.Checkbutton(data_logging_frame, text="Log to .mat", variable=self.log_to_mat).pack(anchor=tk.W, pady=2)
@@ -2341,17 +2323,12 @@ class MonitorControlGUI:
         p = result.points_info
         self.points_var.set(f"Points: {p.run} | H: {p.hammer_point}{p.hammer_dir} | R: {p.response_point}{p.response_dir}")
         
-    def _on_plot_data(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
-                      wave_name: str, hit_key: str):
-        region = frame_result.active_regions.get(wave_name)
-        if region:
-            self.root.after(0, self._update_graph_viewer, wave_result, frame_result, region, hit_key)
+    def _on_plot_data(self, lightweight_data: LightweightHitData, run_history: Dict):
+        """Thread-safe callback to update graph viewer."""
+        self.root.after(0, self._update_graph_viewer, lightweight_data, run_history)
             
-    def _update_graph_viewer(self, wave_result, frame_result, region, hit_key):
-        self.graph_viewer.update_data(
-            wave_result, frame_result, region, hit_key,
-            self.monitor.run_history, self.monitor.app_config
-        )
+    def _update_graph_viewer(self, lightweight_data: LightweightHitData, run_history: Dict):
+        self.graph_viewer.update_data(lightweight_data, run_history, self.monitor.app_config)
         
     def _reset_feedback_ui(self):
         self.class_var.set("Overall: --")
