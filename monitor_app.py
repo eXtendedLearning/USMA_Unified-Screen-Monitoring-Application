@@ -17,51 +17,29 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v.0.4.5 (Pre-Release)
+USMA (Unified Screen Monitoring Application) - v0.5.0 (Calibration Release)
 
-A single, GUI-driven application that combines a professional-grade region
-configuration tool, real-time screen monitoring, visual overlay, and clear
-image logging.
+A professional-grade GUI application for real-time screen monitoring, signal
+analysis, and OCR designed for modal analysis workflows. Captures screen regions,
+reconstructs FRF signals, performs dual-method quality classification (FFT +
+Lowpass), and exports data in industry-standard formats (UNV Dataset 58, MATLAB).
 
-v.0.4.5 (This release):
-- **Performance: Faster Screen Capture**: Switched from pyautogui to mss library
-  for 2-5x faster screen capture using native OS APIs (BitBlt on Windows).
-  Falls back to pyautogui if mss is unavailable.
-- **Compatibility: DPI Awareness**: Added explicit DPI awareness declaration
-  for correct operation on Windows 10/11 with display scaling (125%, 150%, etc.).
-  Fixes coordinate offset issues and blurry GUI rendering.
-- **Robustness: Tesseract Path Fallback**: Application now checks system PATH
-  for Tesseract if the bundled version is not found, with graceful degradation.
-- **Code Quality**: Refactored plotting functions to reduce duplication.
+Key Features:
+- Startup dialog for config selection or new calibration workflow
+- HSV color filter calibration with live preview
+- Mandatory ROI type selection when drawing regions  
+- Pre-load existing config in editor for modification
+- Live analysis parameter adjustment during monitoring
+- Scrollable main GUI with embedded console output
+- Continuous logging mode for HSV debugging ("Log on Events Only" toggle)
+- Dual classification: FFT energy ratio + Lowpass residual analysis
+- Live graph viewer with hit navigation and multiple plot types
+- Organized image logging (ROIs, Masks, Signals, FFT, Lowpass, Residual)
+- UNV Dataset 58 and MATLAB .mat export formats
+- DPI-aware rendering for high-resolution displays
+- Fast screen capture via mss library with pyautogui fallback
 
-v.0.4.4:
-- **Lowpass Residual Analysis (AS's Method)**: Added alternative 
-  classification using time-domain residual analysis:
-  * Butterworth lowpass filter to separate LF/HF content
-  * Exceedance counting for quantitative HF measurement
-  * All analysis performed in PHYSICAL UNITS (g/N) to enable direct
-    comparison with TestLab signals for reconstruction validation
-  * Complementary to existing FFT energy ratio method
-- **Dual Classification System**: 
-  * Both methods flagging = BAD HIT (Red)
-  * One method flagging = SUSPECT (Orange)  
-  * Neither flagging = GOOD HIT (Green)
-- **Live Graph Viewer**: New central panel with matplotlib canvas:
-  * Signal plot, FFT spectrum, Lowpass comparison, Residual analysis
-  * Hit navigation (◀◀/▶▶) to browse through recorded hits
-  * Plot type selector to switch visualization modes
-  * Auto-displays most recent hit, user can navigate to previous
-  * Run Summary bar chart (updated after each hit)
-- **Improved OCR Robustness**: Enhanced preprocessing with multiple
-  attempts, morphological operations, and better regex patterns
-- **Organized Image Logging**: Separate folders for each image type
-  (ROIs, ColorMasks, Signals, FFT, Lowpass, Residual, Summary, OCRs)
-- **Enhanced Verbose Logging**: Includes OCR values and classification
-  reasoning (BAD/SUSPECT/GOOD with method details)
-- **Scrollable Config Tool**: Right panel now scrollable for smaller screens
-- **Extended Logging Options**: Separate checkbox for OCR diagnostic images
-- **BUGFIX**: Fixed memory leak from matplotlib figures in background thread
-- **BUGFIX**: Fixed GDI resource exhaustion from hit_history accumulation
+For full version history, see README.md
 """
 
 import cv2
@@ -162,6 +140,37 @@ logger.addHandler(file_handler)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(log_formatter)
 logger.addHandler(stream_handler)
+
+
+# --- Custom TextHandler for GUI Console ---
+class TextHandler(logging.Handler):
+    """Logging handler that writes to a tkinter Text widget."""
+    
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+        self.setFormatter(log_formatter)
+    
+    def emit(self, record):
+        try:
+            msg = self.format(record) + '\n'
+            # Schedule the update on the main thread
+            self.text_widget.after(0, self._append_text, msg)
+        except Exception:
+            self.handleError(record)
+    
+    def _append_text(self, msg):
+        try:
+            self.text_widget.configure(state='normal')
+            self.text_widget.insert(tk.END, msg)
+            self.text_widget.see(tk.END)  # Auto-scroll to bottom
+            # Limit lines to prevent memory issues (keep last 1000 lines)
+            line_count = int(self.text_widget.index('end-1c').split('.')[0])
+            if line_count > 1000:
+                self.text_widget.delete('1.0', f'{line_count - 1000}.0')
+            self.text_widget.configure(state='disabled')
+        except tk.TclError:
+            pass  # Widget was destroyed
 
 
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
@@ -344,6 +353,12 @@ class ScreenMonitor:
         self.last_known_status: str = "Unknown"
         self.last_known_overload: str = "Unknown"
         
+        # Continuous logging mode (when log_events_only is False)
+        self.log_events_only: bool = True
+        self.continuous_log_interval: float = 1.0  # seconds
+        self.last_continuous_log_time: float = 0.0
+        self.continuous_log_counter: int = 0
+        
         self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         self.sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         
@@ -358,12 +373,13 @@ class ScreenMonitor:
         if MSS_AVAILABLE:
             with mss.mss() as sct:
                 # Capture primary monitor
-                monitor = sct.monitors[1]  # 1 = primary monitor (0 = all monitors combined)
+                monitor = sct.monitors[2]  # 1 = primary monitor (0 = all monitors combined)
                 screenshot = sct.grab(monitor)
-                # mss returns BGRA, convert to BGR for OpenCV compatibility
+                # mss returns BGRA format - use proper OpenCV conversion
+                # This is more reliable than just slicing [:, :, :3]
                 img = np.array(screenshot, dtype=np.uint8)
-                # Drop alpha channel: BGRA -> BGR
-                return img[:, :, :3]
+                # Convert BGRA to BGR using OpenCV for consistent color handling
+                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         else:
             # Fallback to pyautogui
             screenshot = pyautogui.screenshot()
@@ -393,7 +409,7 @@ class ScreenMonitor:
         self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.thread.start()
-        logger.info("Screen monitoring thread started for USMA v.0.4.5")
+        logger.info("Screen monitoring thread started for USMA v0.5.0")
         return True
 
     def stop(self):
@@ -415,10 +431,28 @@ class ScreenMonitor:
 
     def _load_config(self, path: str) -> AppConfig:
         try:
+            logger.info(f"Loading config from: {path}")
+            if not os.path.exists(path):
+                logger.warning(f"Config file does not exist: {path}")
+                return AppConfig()
+            
             with open(path, 'r') as f:
                 config_data = json.load(f)
+            
             config = AppConfig()
             metadata = config_data.get('_metadata', {})
+            
+            # Debug: Log what we found in metadata
+            logger.info(f"Config _metadata keys: {list(metadata.keys()) if metadata else 'NONE'}")
+            if 'hsv_lower' in metadata:
+                logger.info(f"  Found hsv_lower in config: {metadata['hsv_lower']}")
+            else:
+                logger.warning(f"  hsv_lower NOT FOUND in config _metadata - using defaults")
+            if 'hsv_upper' in metadata:
+                logger.info(f"  Found hsv_upper in config: {metadata['hsv_upper']}")
+            else:
+                logger.warning(f"  hsv_upper NOT FOUND in config _metadata - using defaults")
+            
             config.hsv_lower = metadata.get('hsv_lower', config.hsv_lower)
             config.hsv_upper = metadata.get('hsv_upper', config.hsv_upper)
             config.screenshot_interval = metadata.get('screenshot_interval', config.screenshot_interval)
@@ -429,15 +463,21 @@ class ScreenMonitor:
             config.residual_threshold = metadata.get('residual_threshold', config.residual_threshold)
             config.exceedance_ratio_threshold = metadata.get('exceedance_ratio_threshold', config.exceedance_ratio_threshold)
             
+            logger.info(f"Config loaded - HSV Lower: {config.hsv_lower}, HSV Upper: {config.hsv_upper}")
+            
             region_fields = MonitoringRegion.__annotations__.keys()
             for name, data in config_data.items():
                 if not name.startswith('_') and isinstance(data, dict):
                     filtered_data = {k: v for k, v in data.items() if k in region_fields}
                     if 'name' in filtered_data:
                         config.regions[name] = MonitoringRegion(**filtered_data)
+            
+            logger.info(f"Config regions loaded: {list(config.regions.keys())}")
             return config
         except Exception as e:
             logger.error(f"Failed to load config from {path}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return AppConfig()
 
     def _audio_callback(self, outdata, frames, time_info, status):
@@ -497,7 +537,15 @@ class ScreenMonitor:
                         elif not is_hf and self.audio_stream is not None:
                             self._stop_audio_feedback()
                 
-                self._handle_logging(frame_result, all_rois)
+                # Handle logging: event-based or continuous
+                if self.log_events_only:
+                    self._handle_logging(frame_result, all_rois)
+                else:
+                    # Continuous logging mode - log every continuous_log_interval seconds
+                    current_time = time.time()
+                    if current_time - self.last_continuous_log_time >= self.continuous_log_interval:
+                        self._handle_continuous_logging(frame_result, all_rois)
+                        self.last_continuous_log_time = current_time
                 
                 elapsed_time = time.time() - start_time
                 sleep_duration = self.app_config.screenshot_interval - elapsed_time
@@ -676,6 +724,48 @@ class ScreenMonitor:
                         run=points.run
                     )
                     self.plot_callback(lightweight_data, self.run_history.copy())
+
+    def _handle_continuous_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
+        """
+        Continuous logging mode - saves images and logs every interval regardless of wave events.
+        Used for debugging HSV calibration and signal detection issues.
+        """
+        self.continuous_log_counter += 1
+        timestamp = datetime.now().strftime("%H%M%S")
+        base_filename = f"continuous_{timestamp}_{self.continuous_log_counter}"
+        
+        if self.verbose_logging_enabled:
+            logger.info(f"--- CONTINUOUS LOG #{self.continuous_log_counter} ---")
+            logger.info(f"  HSV Lower: {self.app_config.hsv_lower}")
+            logger.info(f"  HSV Upper: {self.app_config.hsv_upper}")
+            logger.info(f"  Status: '{frame_result.status_text}'")
+            logger.info(f"  Wave Results: {len(frame_result.wave_results)} regions detected")
+            if frame_result.avg_energy_ratio is not None:
+                logger.info(f"  Avg Energy Ratio: {frame_result.avg_energy_ratio:.3e}")
+                logger.info(f"  Avg Exceedance: {frame_result.avg_exceedance_count}")
+        
+        # Save images for all wave regions regardless of detection
+        if self.image_logging_enabled:
+            for region_name, region in self.app_config.regions.items():
+                if region.roi_type == 'wave' and region.enabled:
+                    if region_name in all_rois:
+                        roi = all_rois[region_name]
+                        
+                        # Always save ROI screenshot in continuous mode
+                        if self.image_log_options.include_screenshot:
+                            cv2.imwrite(f"image_logs/ROIs/{base_filename}_{region_name}_ROI.jpg", roi)
+                        
+                        # Create and save mask image
+                        if self.image_log_options.include_color_filter:
+                            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                            mask = cv2.inRange(hsv, np.array(self.app_config.hsv_lower), np.array(self.app_config.hsv_upper))
+                            cv2.imwrite(f"image_logs/ColorMasks/{base_filename}_{region_name}_mask.jpg", mask)
+                            
+                            # Log mask statistics
+                            total_px = mask.shape[0] * mask.shape[1]
+                            white_px = np.count_nonzero(mask)
+                            if self.verbose_logging_enabled:
+                                logger.info(f"  [{region_name}] Mask: {white_px}/{total_px} ({100*white_px/total_px:.2f}%) white pixels")
 
     # =========================================================================
     # ENHANCED OCR METHODS
@@ -1005,9 +1095,19 @@ class ScreenMonitor:
     def _analyze_wave_pattern(self, roi: np.ndarray, region: MonitoringRegion) -> Optional[WaveAnalysisResult]:
         if roi.size == 0:
             return None
+        
+        # Debug: Log HSV filter values being used (only when verbose logging enabled)
+        if self.verbose_logging_enabled and self.frame_count % 20 == 0:  # Log every 20th frame to avoid spam
+            logger.info(f"[HSV DEBUG] Lower: {self.app_config.hsv_lower}, Upper: {self.app_config.hsv_upper}")
             
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(self.app_config.hsv_lower), np.array(self.app_config.hsv_upper))
+        
+        # Debug: Log mask statistics (only when verbose logging enabled)
+        if self.verbose_logging_enabled and self.frame_count % 20 == 0:
+            total_px = mask.shape[0] * mask.shape[1]
+            white_px = np.count_nonzero(mask)
+            logger.info(f"[MASK DEBUG] White pixels: {white_px}/{total_px} ({100*white_px/total_px:.2f}%)")
         
         if not self._validate_signal_quality(mask):
             return None
@@ -1504,6 +1604,362 @@ class ScreenMonitor:
 
 
 # --- 4. VISUALIZATION & CONFIGURATION ---
+
+# --- 4a. STARTUP DIALOG ---
+class StartupDialog(tk.Toplevel):
+    """
+    Startup dialog for config selection or new calibration.
+
+    Attributes:
+        result: str or None - Selected config path, "NEW_CALIBRATION", or None if cancelled
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("USMA v0.5.0 - Startup")
+        self.result = None
+
+        # Don't use transient() with hidden parent - causes display issues on Windows
+        # self.transient(parent)  # REMOVED
+
+        # Scan for config files first to determine window size
+        self.config_files = self._scan_configs()
+
+        # Set window size based on content
+        # Larger window when configs exist to show all buttons
+        window_height = 320 if self.config_files else 250
+        self.geometry(f"450x{window_height}")
+        self.resizable(False, False)
+
+        self._setup_ui()
+
+        # Center dialog
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() - self.winfo_width()) // 2
+        y = (self.winfo_screenheight() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+        # Make modal - grab_set AFTER geometry is set
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # Ensure window is visible before grabbing
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.grab_set()
+
+        self.wait_window(self)
+
+    def _scan_configs(self):
+        """Scan configs directory for .json files."""
+        config_dir = "configs"
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
+            return []
+        return [f for f in os.listdir(config_dir) if f.endswith('.json')]
+
+    def _setup_ui(self):
+        # Title
+        title_frame = ttk.Frame(self)
+        title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        ttk.Label(title_frame, text="USMA - Unified Screen Monitoring Application",
+                  font=("Segoe UI", 11, "bold")).pack()
+        ttk.Label(title_frame, text="v0.5.0 - Calibration Release",
+                  font=("Segoe UI", 9)).pack()
+
+        separator = ttk.Separator(self, orient=tk.HORIZONTAL)
+        separator.pack(fill=tk.X, padx=20, pady=10)
+
+        if self.config_files:
+            # Show config selection
+            select_frame = ttk.LabelFrame(self, text="Load Existing Configuration")
+            select_frame.pack(fill=tk.X, padx=20, pady=5)
+
+            combo_frame = ttk.Frame(select_frame)
+            combo_frame.pack(fill=tk.X, padx=10, pady=10)
+
+            ttk.Label(combo_frame, text="Select Config:").pack(side=tk.LEFT, padx=(0, 5))
+            self.config_var = tk.StringVar(value=self.config_files[0])
+            config_combo = ttk.Combobox(combo_frame, textvariable=self.config_var,
+                                        values=self.config_files, state='readonly', width=30)
+            config_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+            ttk.Button(combo_frame, text="Load", command=self._on_load, width=10).pack(side=tk.LEFT)
+
+            # "Or" label
+            ttk.Label(self, text="— Or —", font=("Segoe UI", 9)).pack(pady=5)
+        else:
+            # No configs found
+            info_frame = ttk.Frame(self)
+            info_frame.pack(fill=tk.X, padx=20, pady=10)
+            ttk.Label(info_frame, text="No configuration files found.",
+                      font=("Segoe UI", 10)).pack()
+            ttk.Label(info_frame, text="Let's create your first calibration!",
+                      font=("Segoe UI", 9)).pack()
+
+        # Create new calibration button
+        new_cal_btn = ttk.Button(self, text="Create New Calibration",
+                                 command=self._on_new_calibration, width=30)
+        new_cal_btn.pack(pady=(5, 20))
+
+        # Cancel button at bottom
+        if self.config_files:
+            ttk.Button(self, text="Cancel", command=self._on_cancel, width=10).pack(pady=(0, 10))
+
+    def _on_load(self):
+        """Set result to selected config path."""
+        selected = self.config_var.get()
+        if selected:
+            self.result = os.path.join("configs", selected)
+            self.destroy()
+
+    def _on_new_calibration(self):
+        """Set result to trigger new calibration."""
+        self.result = "NEW_CALIBRATION"
+        self.destroy()
+
+    def _on_cancel(self):
+        """User closed dialog without selection."""
+        self.result = None
+        self.destroy()
+
+
+# --- 4b. HSV CALIBRATION WINDOW ---
+class HSVCalibrationWindow(tk.Toplevel):
+    """
+    HSV color filter calibration with live preview.
+
+    Args:
+        parent: Parent window
+        screenshot: Full screenshot numpy array (BGR)
+        wave_regions: Dict of wave MonitoringRegion objects
+        current_hsv_lower: Current [H, S, V] lower bounds
+        current_hsv_upper: Current [H, S, V] upper bounds
+    """
+
+    def __init__(self, parent, screenshot, wave_regions, current_hsv_lower, current_hsv_upper):
+        super().__init__(parent)
+        self.title("HSV Color Filter Calibration")
+        self.screenshot = screenshot
+        self.wave_regions = wave_regions
+        self.result_hsv_lower = None
+        self.result_hsv_upper = None
+
+        # Current values (copy to avoid modifying original until Apply)
+        self.hsv_lower = list(current_hsv_lower)
+        self.hsv_upper = list(current_hsv_upper)
+
+        # Selected region for preview
+        self.selected_region_name = list(wave_regions.keys())[0] if wave_regions else None
+
+        self.geometry("900x700")
+        self._setup_ui()
+
+        self.transient(parent)
+        self.grab_set()
+
+        # Initial preview update (delayed to ensure canvas is ready)
+        self.after(100, self._update_preview)
+
+    def _setup_ui(self):
+        # Top: Region selector (if multiple wave regions)
+        if len(self.wave_regions) > 1:
+            selector_frame = ttk.Frame(self)
+            selector_frame.pack(fill=tk.X, padx=10, pady=5)
+            ttk.Label(selector_frame, text="Preview Region:").pack(side=tk.LEFT)
+            self.region_var = tk.StringVar(value=self.selected_region_name)
+            region_combo = ttk.Combobox(selector_frame, textvariable=self.region_var,
+                                        values=list(self.wave_regions.keys()), state='readonly', width=20)
+            region_combo.pack(side=tk.LEFT, padx=5)
+            region_combo.bind("<<ComboboxSelected>>", self._on_region_changed)
+
+        # Preview canvas
+        preview_frame = ttk.LabelFrame(self, text="Preview: Original | Mask | Filtered")
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        self.preview_canvas = tk.Canvas(preview_frame, bg='black')
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Sliders frame
+        sliders_frame = ttk.LabelFrame(self, text="HSV Ranges (Hue: 0-179, Saturation/Value: 0-255)")
+        sliders_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Create slider variables
+        self.h_min_var = tk.IntVar(value=self.hsv_lower[0])
+        self.h_max_var = tk.IntVar(value=self.hsv_upper[0])
+        self.s_min_var = tk.IntVar(value=self.hsv_lower[1])
+        self.s_max_var = tk.IntVar(value=self.hsv_upper[1])
+        self.v_min_var = tk.IntVar(value=self.hsv_lower[2])
+        self.v_max_var = tk.IntVar(value=self.hsv_upper[2])
+
+        # Layout sliders in grid
+        self._create_slider_row(sliders_frame, 0, "Hue", self.h_min_var, self.h_max_var, 0, 179)
+        self._create_slider_row(sliders_frame, 1, "Saturation", self.s_min_var, self.s_max_var, 0, 255)
+        self._create_slider_row(sliders_frame, 2, "Value", self.v_min_var, self.v_max_var, 0, 255)
+
+        # Buttons
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Button(button_frame, text="Reset to Default", command=self._on_reset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self._on_cancel).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="Apply", command=self._on_apply).pack(side=tk.RIGHT, padx=5)
+
+    def _create_slider_row(self, parent, row, label, min_var, max_var, range_min, range_max):
+        """Create a row with label, min slider, max slider."""
+        ttk.Label(parent, text=f"{label}:", width=10).grid(row=row, column=0, padx=5, pady=5, sticky=tk.W)
+
+        ttk.Label(parent, text="Min:").grid(row=row, column=1, padx=2)
+        min_slider = ttk.Scale(parent, from_=range_min, to=range_max, variable=min_var,
+                               orient=tk.HORIZONTAL, length=250, command=lambda _: self._on_slider_changed())
+        min_slider.grid(row=row, column=2, padx=2)
+        ttk.Label(parent, textvariable=min_var, width=4).grid(row=row, column=3, padx=2)
+
+        ttk.Label(parent, text="Max:").grid(row=row, column=4, padx=(15, 2))
+        max_slider = ttk.Scale(parent, from_=range_min, to=range_max, variable=max_var,
+                               orient=tk.HORIZONTAL, length=250, command=lambda _: self._on_slider_changed())
+        max_slider.grid(row=row, column=5, padx=2)
+        ttk.Label(parent, textvariable=max_var, width=4).grid(row=row, column=6, padx=2)
+
+    def _on_slider_changed(self):
+        """Update preview when any slider changes."""
+        self.hsv_lower = [self.h_min_var.get(), self.s_min_var.get(), self.v_min_var.get()]
+        self.hsv_upper = [self.h_max_var.get(), self.s_max_var.get(), self.v_max_var.get()]
+        self._update_preview()
+
+    def _update_preview(self):
+        """Update the preview canvas with current HSV filter applied."""
+        if not self.selected_region_name or self.screenshot is None:
+            return
+
+        region = self.wave_regions[self.selected_region_name]
+        roi = self.screenshot[region.y:region.y+region.height, region.x:region.x+region.width]
+
+        if roi.size == 0:
+            return
+
+        # Apply HSV filter
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(self.hsv_lower), np.array(self.hsv_upper))
+
+        # Create visualization: Original | Mask | Filtered
+        roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+        filtered = cv2.bitwise_and(roi_rgb, roi_rgb, mask=mask)
+
+        # Combine horizontally
+        combined = np.hstack([roi_rgb, mask_rgb, filtered])
+
+        # Resize to fit canvas
+        canvas_w = self.preview_canvas.winfo_width()
+        canvas_h = self.preview_canvas.winfo_height()
+        if canvas_w < 10 or canvas_h < 10:
+            canvas_w, canvas_h = 860, 400
+
+        img_h, img_w = combined.shape[:2]
+        scale = min(canvas_w / img_w, canvas_h / img_h, 1.0)
+        new_w, new_h = int(img_w * scale), int(img_h * scale)
+
+        if new_w > 0 and new_h > 0:
+            resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            self.preview_photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
+
+            self.preview_canvas.delete("all")
+            x_offset = (canvas_w - new_w) // 2
+            y_offset = (canvas_h - new_h) // 2
+            self.preview_canvas.create_image(x_offset, y_offset, image=self.preview_photo, anchor=tk.NW)
+
+            # Add labels
+            section_w = new_w // 3
+            self.preview_canvas.create_text(x_offset + section_w//2, y_offset + new_h + 10,
+                                           text="Original", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
+            self.preview_canvas.create_text(x_offset + section_w + section_w//2, y_offset + new_h + 10,
+                                           text="Mask", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
+            self.preview_canvas.create_text(x_offset + 2*section_w + section_w//2, y_offset + new_h + 10,
+                                           text="Filtered", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
+
+    def _on_region_changed(self, event=None):
+        self.selected_region_name = self.region_var.get()
+        self._update_preview()
+
+    def _on_apply(self):
+        self.result_hsv_lower = self.hsv_lower.copy()
+        self.result_hsv_upper = self.hsv_upper.copy()
+        self.destroy()
+
+    def _on_cancel(self):
+        self.destroy()
+
+    def _on_reset(self):
+        """Reset to default HSV values."""
+        self.h_min_var.set(0)
+        self.h_max_var.set(179)
+        self.s_min_var.set(0)
+        self.s_max_var.set(255)
+        self.v_min_var.set(0)
+        self.v_max_var.set(240)
+        self._on_slider_changed()
+
+
+# --- 4c. ROI TYPE SELECTION DIALOG ---
+class ROITypeDialog(tk.Toplevel):
+    """
+    Simple dialog to select ROI type after drawing a region.
+    """
+
+    ROI_TYPES = ['wave', 'status', 'overload', 'run', 'hammer', 'response']
+
+    def __init__(self, parent, region_name: str):
+        super().__init__(parent)
+        self.title("Select Region Type")
+        self.result = None
+        self.region_name = region_name
+
+        self.geometry("350x200")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._setup_ui()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # Center on parent
+        self.update_idletasks()
+        if parent.winfo_exists():
+            x = parent.winfo_x() + (parent.winfo_width() - self.winfo_width()) // 2
+            y = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
+            self.geometry(f"+{x}+{y}")
+
+    def _setup_ui(self):
+        ttk.Label(self, text=f"Select type for region '{self.region_name}':",
+                  font=("Segoe UI", 10, "bold")).pack(pady=(20, 15))
+
+        self.type_var = tk.StringVar(value='wave')
+
+        type_frame = ttk.Frame(self)
+        type_frame.pack(pady=10)
+
+        for i, roi_type in enumerate(self.ROI_TYPES):
+            ttk.Radiobutton(type_frame, text=roi_type.capitalize(),
+                           variable=self.type_var, value=roi_type).grid(
+                               row=i//3, column=i%3, padx=15, pady=5, sticky=tk.W)
+
+        button_frame = ttk.Frame(self)
+        button_frame.pack(pady=20)
+
+        ttk.Button(button_frame, text="OK", command=self._on_ok, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self._on_cancel, width=12).pack(side=tk.LEFT, padx=5)
+
+    def _on_ok(self):
+        self.result = self.type_var.get()
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class RegionOverlay(tk.Toplevel):
     def __init__(self, parent, config_path):
         super().__init__(parent)
@@ -1533,12 +1989,23 @@ class RegionOverlay(tk.Toplevel):
 
 class ConfigToolWindow(tk.Toplevel):
     """Advanced Region & Color Configuration Tool with scrollable right panel."""
-    
-    def __init__(self, parent, main_root):
+
+    def __init__(self, parent, main_root, is_new_calibration=False, preload_config_path=None):
         super().__init__(parent)
         self.title("Advanced Region & Color Configuration Tool")
         self.main_root = main_root
-        self.app_config = AppConfig()
+        self.is_new_calibration = is_new_calibration
+        self.saved_config_path = None  # Track if/where config was saved
+        self.current_config_path = None
+
+        # Initialize app_config - load from preload_config_path if provided
+        if preload_config_path and os.path.exists(preload_config_path):
+            # Load existing config
+            self.app_config = ScreenMonitor(preload_config_path).app_config
+            self.current_config_path = preload_config_path
+        else:
+            self.app_config = AppConfig()
+
         self.screenshot = None
         self.photo = None
         self.scale = 1.0
@@ -1549,10 +2016,14 @@ class ConfigToolWindow(tk.Toplevel):
         self.resize_timer = None
         self.x_offset = 0
         self.y_offset = 0
-        self.state('zoomed') 
+        self.state('zoomed')
         self._setup_gui()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.after(200, self._take_screenshot)
+
+        # If we preloaded a config, update UI after screenshot is taken
+        if self.current_config_path:
+            self.after(400, self._update_ui_from_data)
 
     def _on_closing(self):
         self.main_root.deiconify()
@@ -1610,7 +2081,13 @@ class ConfigToolWindow(tk.Toplevel):
         capture_frame = ttk.LabelFrame(parent, text="Capture")
         capture_frame.pack(fill=tk.X, pady=5, padx=5)
         ttk.Button(capture_frame, text="Take Screenshot", command=self._take_screenshot).pack(pady=5, padx=5, fill=tk.X)
-        
+
+        # HSV Calibration button
+        self.hsv_cal_btn = ttk.Button(capture_frame, text="Calibrate Color Filter",
+                                       command=self._open_hsv_calibration)
+        self.hsv_cal_btn.pack(fill=tk.X, pady=(0, 5), padx=5)
+        self.hsv_cal_btn.config(state=tk.DISABLED)  # Disabled by default
+
         list_frame = ttk.LabelFrame(parent, text="Defined Regions")
         list_frame.pack(fill=tk.X, pady=5, padx=5)
         
@@ -1775,20 +2252,81 @@ class ConfigToolWindow(tk.Toplevel):
         self.drawing = False
         x1_c, y1_c = min(self.start_x, event.x), min(self.start_y, event.y)
         x2_c, y2_c = max(self.start_x, event.x), max(self.start_y, event.y)
+
+        # Check minimum size
+        if abs(x2_c - x1_c) < 10 or abs(y2_c - y1_c) < 10:
+            self.canvas.delete("selection_rect")
+            return
+
         x1 = int((x1_c - self.x_offset) / self.scale)
         y1 = int((y1_c - self.y_offset) / self.scale)
         x2 = int((x2_c - self.x_offset) / self.scale)
         y2 = int((y2_c - self.y_offset) / self.scale)
+
         name = f"region_{len(self.app_config.regions)+1}"
-        new_region = MonitoringRegion(name=name, x=x1, y=y1, width=x2-x1, height=y2-y1, roi_type='wave')
-        self.app_config.regions[name] = new_region
+
+        # Show type selection dialog
+        type_dialog = ROITypeDialog(self, name)
+        self.wait_window(type_dialog)
+
         self.canvas.delete("selection_rect")
+
+        if type_dialog.result is None:
+            # User cancelled - don't create region
+            return
+
+        new_region = MonitoringRegion(
+            name=name, x=x1, y=y1, width=x2-x1, height=y2-y1,
+            roi_type=type_dialog.result
+        )
+        self.app_config.regions[name] = new_region
+
         self._update_ui_from_data()
+        self._update_hsv_button_state()  # Update HSV button state
+
+        # Select new region in listbox
         new_idx = sorted(self.app_config.regions.keys()).index(name)
         self.region_listbox.selection_clear(0, tk.END)
         self.region_listbox.selection_set(new_idx)
         self.region_listbox.activate(new_idx)
         self._on_listbox_select(None)
+
+    def _update_hsv_button_state(self):
+        """Enable HSV calibration button only if wave regions exist."""
+        wave_regions = {name: r for name, r in self.app_config.regions.items()
+                        if r.roi_type == 'wave'}
+        state = tk.NORMAL if wave_regions else tk.DISABLED
+        self.hsv_cal_btn.config(state=state)
+
+    def _open_hsv_calibration(self):
+        """Open HSV calibration window."""
+        if self.screenshot is None:
+            messagebox.showwarning("Warning", "Please take a screenshot first.", parent=self)
+            return
+
+        wave_regions = {name: r for name, r in self.app_config.regions.items()
+                        if r.roi_type == 'wave'}
+
+        if not wave_regions:
+            messagebox.showwarning("Warning", "No wave regions defined.", parent=self)
+            return
+
+        hsv_window = HSVCalibrationWindow(
+            self,
+            self.screenshot,
+            wave_regions,
+            self.app_config.hsv_lower,
+            self.app_config.hsv_upper
+        )
+
+        # Wait for window to close
+        self.wait_window(hsv_window)
+
+        # Apply results if user clicked Apply
+        if hsv_window.result_hsv_lower is not None:
+            self.app_config.hsv_lower = hsv_window.result_hsv_lower
+            self.app_config.hsv_upper = hsv_window.result_hsv_upper
+            messagebox.showinfo("Success", "HSV color filter updated.", parent=self)
 
     def _apply_params(self):
         self.app_config.fft_cutoff_frequency = self.param_vars['fft_cutoff_frequency'].get()
@@ -1823,6 +2361,7 @@ class ConfigToolWindow(tk.Toplevel):
         self.param_vars['residual_threshold'].set(self.app_config.residual_threshold)
         self.param_vars['exceedance_ratio_threshold'].set(self.app_config.exceedance_ratio_threshold)
         self._redraw_regions_on_canvas()
+        self._update_hsv_button_state()  # Update HSV button state
 
     def _redraw_regions_on_canvas(self):
         self.canvas.delete("region")
@@ -1884,7 +2423,14 @@ class ConfigToolWindow(tk.Toplevel):
             self._update_ui_from_data()
 
     def _save_config(self):
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], initialdir="configs", parent=self)
+        initial_file = os.path.basename(self.current_config_path) if self.current_config_path else "new_config.json"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialdir="configs",
+            initialfile=initial_file,
+            parent=self
+        )
         if not path:
             return
         try:
@@ -1903,6 +2449,9 @@ class ConfigToolWindow(tk.Toplevel):
             }
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
+
+            self.saved_config_path = path  # Track that we saved
+            self.current_config_path = path
             messagebox.showinfo("Success", f"Saved to {os.path.basename(path)}", parent=self)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save: {e}", parent=self)
@@ -1923,22 +2472,24 @@ class ConfigToolWindow(tk.Toplevel):
 
 # --- 5. LIVE GRAPH VIEWER ---
 class GraphViewerFrame(ttk.LabelFrame):
-    """Embedded matplotlib graph viewer with hit and plot type navigation."""
+    """Embedded matplotlib graph viewer with hit navigation and console output."""
     
     PLOT_TYPES = ['Signal', 'FFT', 'Lowpass Comparison', 'Residual Analysis', 'Run Summary']
     MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
     
     def __init__(self, parent):
-        super().__init__(parent, text="Graph Viewer")
+        super().__init__(parent, text="Graph Viewer & Console")
         self.current_plot_index = 0
         self.current_hit_index = -1
         self.hit_history: List[LightweightHitData] = []
         self.run_history = {}
         self.app_config = None
+        self.text_handler = None  # Will be set up after console is created
         
         self._setup_ui()
         
     def _setup_ui(self):
+        # Navigation frame at top
         nav_frame = ttk.Frame(self)
         nav_frame.pack(fill=tk.X, padx=5, pady=5)
         
@@ -1972,20 +2523,53 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
         
-        canvas_frame = ttk.Frame(self)
-        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Notebook with Graph and Console tabs
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.figure = Figure(figsize=(8, 4), dpi=100, facecolor='#1E1E1E')
+        # Graph tab
+        graph_frame = ttk.Frame(self.notebook)
+        self.notebook.add(graph_frame, text="Graph")
+        
+        self.figure = Figure(figsize=(8, 3), dpi=100, facecolor='#1E1E1E')
         self.ax = self.figure.add_subplot(111)
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='both', colors='white')
         self.ax.set_title('Waiting for data...', color='white')
         
-        self.canvas = FigureCanvasTkAgg(self.figure, master=canvas_frame)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=graph_frame)
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
+        # Console tab
+        console_frame = ttk.Frame(self.notebook)
+        self.notebook.add(console_frame, text="Console")
+        
+        # Console text widget with scrollbar
+        console_scroll = ttk.Scrollbar(console_frame, orient=tk.VERTICAL)
+        console_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.console_text = tk.Text(console_frame, wrap=tk.WORD, bg='#1E1E1E', fg='#00FF00',
+                                    font=('Consolas', 9), state='disabled',
+                                    yscrollcommand=console_scroll.set)
+        self.console_text.pack(fill=tk.BOTH, expand=True)
+        console_scroll.config(command=self.console_text.yview)
+        
+        # Add text handler to logger
+        self.text_handler = TextHandler(self.console_text)
+        logger.addHandler(self.text_handler)
+        
+        # Clear console button
+        clear_btn = ttk.Button(console_frame, text="Clear Console", command=self._clear_console)
+        clear_btn.pack(pady=2)
+        
         self._update_navigation_state()
+    
+    def _clear_console(self):
+        """Clear the console text widget."""
+        self.console_text.configure(state='normal')
+        self.console_text.delete('1.0', tk.END)
+        self.console_text.configure(state='disabled')
     
     def _prev_hit(self):
         if self.current_hit_index > 0:
@@ -2227,12 +2811,14 @@ class GraphViewerFrame(ttk.LabelFrame):
 
 # --- 6. MAIN GUI ---
 class MonitorControlGUI:
-    def __init__(self, root):
+    def __init__(self, root, config_path=None):
         self.root = root
-        self.root.title("USMA v.0.4.5 (Pre-Release)")
+        self.root.title("USMA v0.5.0 - Calibration Release")
         self.root.geometry("1000x750")
-        
-        self.config_path = tk.StringVar(value="configs/default_config.json")
+
+        # Use provided config path or default
+        default_config = "configs/default_config.json" if config_path is None else config_path
+        self.config_path = tk.StringVar(value=default_config)
         self.is_monitoring = tk.BooleanVar(value=False)
         self.is_overlay_on = tk.BooleanVar(value=False)
         self.verbose_logging_on = tk.BooleanVar(value=True)
@@ -2245,6 +2831,7 @@ class MonitorControlGUI:
         self.log_opt_residual_plot = tk.BooleanVar(value=False)
         self.log_opt_summary_chart = tk.BooleanVar(value=False)
         self.log_opt_ocr_images = tk.BooleanVar(value=False)
+        self.log_events_only = tk.BooleanVar(value=True)  # When False, logs every ~1 second
         
         self.audio_feedback_on = tk.BooleanVar(value=False)
         self.log_to_mat = tk.BooleanVar(value=False)
@@ -2268,8 +2855,40 @@ class MonitorControlGUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
     
     def _setup_main_gui(self):
-        frame = ttk.Frame(self.root, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # Create main container with scrollbars
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Canvas for scrolling
+        self.main_canvas = tk.Canvas(main_container, highlightthickness=0)
+        v_scrollbar = ttk.Scrollbar(main_container, orient=tk.VERTICAL, command=self.main_canvas.yview)
+        h_scrollbar = ttk.Scrollbar(main_container, orient=tk.HORIZONTAL, command=self.main_canvas.xview)
+        
+        # Scrollable frame inside canvas
+        self.scrollable_frame = ttk.Frame(self.main_canvas, padding=10)
+        
+        # Configure canvas scrolling
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        )
+        
+        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.main_canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # Bind mouse wheel scrolling
+        self.main_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        
+        # Layout scrollbars and canvas
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Make canvas resize with window
+        main_container.bind("<Configure>", self._on_main_resize)
+        
+        # Now build content inside scrollable_frame
+        frame = self.scrollable_frame
         
         config_frame = ttk.LabelFrame(frame, text="Configuration")
         config_frame.pack(fill=tk.X, pady=5)
@@ -2300,8 +2919,10 @@ class MonitorControlGUI:
         ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=1, column=3, columnspan=2, sticky=tk.W, padx=5)
         feedback_frame.columnconfigure(3, weight=1)
         
+        # Graph viewer with reduced minimum height
         self.graph_viewer = GraphViewerFrame(frame)
         self.graph_viewer.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.graph_viewer.configure(height=200)  # Set minimum height
 
         bottom_panel = ttk.Frame(frame)
         bottom_panel.pack(fill=tk.X, pady=5)
@@ -2314,6 +2935,12 @@ class MonitorControlGUI:
         
         self.overlay_check = ttk.Checkbutton(control_frame, text="Show Overlay", variable=self.is_overlay_on, command=self._toggle_overlay)
         self.overlay_check.pack(padx=10, pady=(0,5))
+        
+        # Log on Events Only checkbox (new)
+        self.events_only_check = ttk.Checkbutton(control_frame, text="Log on Events Only", 
+                                                  variable=self.log_events_only,
+                                                  command=self._toggle_events_only)
+        self.events_only_check.pack(padx=10, pady=(0,5))
         
         params_frame = ttk.LabelFrame(control_frame, text="Parameters")
         params_frame.pack(padx=5, pady=5, fill=tk.Y)
@@ -2383,10 +3010,95 @@ class MonitorControlGUI:
         ttk.Checkbutton(data_logging_frame, text="Log to .mat", variable=self.log_to_mat).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(data_logging_frame, text="Log to .unv", variable=self.log_to_unv).pack(anchor=tk.W, pady=2)
 
+        # Analysis Parameters Frame (Live Tuning)
+        params_outer_frame = ttk.LabelFrame(right_panel, text="Analysis Parameters (Live)")
+        params_outer_frame.pack(fill=tk.X, pady=(10, 0))
+
+        # Initialize parameter variables from current config
+        self.param_vars = {
+            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
+            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
+            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
+            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
+            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
+            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
+        }
+
+        # FFT Parameters row
+        fft_frame = ttk.Frame(params_outer_frame)
+        fft_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(fft_frame, text="FFT Cutoff:", width=12).pack(side=tk.LEFT)
+        fft_cutoff_spin = ttk.Spinbox(fft_frame, from_=0.01, to=0.5, increment=0.01,
+                                      textvariable=self.param_vars['fft_cutoff_frequency'],
+                                      width=7, command=self._apply_params_live)
+        fft_cutoff_spin.pack(side=tk.LEFT, padx=2)
+        fft_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(fft_frame, text="E.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        fft_ratio_spin = ttk.Spinbox(fft_frame, from_=0.001, to=0.5, increment=0.001,
+                                     textvariable=self.param_vars['fft_energy_ratio_threshold'],
+                                     width=7, command=self._apply_params_live)
+        fft_ratio_spin.pack(side=tk.LEFT, padx=2)
+        fft_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Lowpass Parameters row
+        lp_frame = ttk.Frame(params_outer_frame)
+        lp_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(lp_frame, text="LP Cutoff:", width=12).pack(side=tk.LEFT)
+        lp_cutoff_spin = ttk.Spinbox(lp_frame, from_=0.01, to=0.5, increment=0.01,
+                                     textvariable=self.param_vars['lowpass_cutoff'],
+                                     width=7, command=self._apply_params_live)
+        lp_cutoff_spin.pack(side=tk.LEFT, padx=2)
+        lp_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(lp_frame, text="Order:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        lp_order_spin = ttk.Spinbox(lp_frame, from_=1, to=10, increment=1,
+                                    textvariable=self.param_vars['lowpass_filter_order'],
+                                    width=4, command=self._apply_params_live)
+        lp_order_spin.pack(side=tk.LEFT, padx=2)
+        lp_order_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Residual Parameters row
+        res_frame = ttk.Frame(params_outer_frame)
+        res_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(res_frame, text="Res.Thr:", width=12).pack(side=tk.LEFT)
+        res_thr_spin = ttk.Spinbox(res_frame, from_=0.0001, to=0.1, increment=0.0005,
+                                   textvariable=self.param_vars['residual_threshold'],
+                                   width=8, format="%.4f", command=self._apply_params_live)
+        res_thr_spin.pack(side=tk.LEFT, padx=2)
+        res_thr_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(res_frame, text="Exc.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.5, increment=0.01,
+                                     textvariable=self.param_vars['exceedance_ratio_threshold'],
+                                     width=7, command=self._apply_params_live)
+        exc_ratio_spin.pack(side=tk.LEFT, padx=2)
+        exc_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+
         self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
         self._toggle_img_log_options_state()
         self._update_manual_points_state()
+    
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling."""
+        self.main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+    def _on_main_resize(self, event):
+        """Resize canvas window when main window resizes."""
+        # Update the width of the canvas window to match canvas width
+        canvas_width = event.width
+        self.main_canvas.itemconfig(self.canvas_window, width=canvas_width)
+    
+    def _toggle_events_only(self):
+        """Toggle between event-based and continuous logging."""
+        self.monitor.log_events_only = self.log_events_only.get()
+        if not self.log_events_only.get():
+            self.monitor.last_continuous_log_time = 0  # Reset timer to log immediately
+            self.monitor.continuous_log_counter = 0
+            logger.info("Continuous logging mode ENABLED - logging every ~1 second")
+        else:
+            logger.info("Event-based logging mode ENABLED - logging only on wave events")
 
     def _toggle_audio_feedback(self):
         self.monitor.set_audio_feedback(self.audio_feedback_on.get())
@@ -2396,6 +3108,26 @@ class MonitorControlGUI:
         for col in self.img_log_options_frame.winfo_children():
             for child in col.winfo_children():
                 child.configure(state=state)
+
+    def _apply_params_live(self):
+        """Apply parameter changes to the running monitor immediately."""
+        try:
+            self.monitor.app_config.fft_cutoff_frequency = self.param_vars['fft_cutoff_frequency'].get()
+            self.monitor.app_config.fft_energy_ratio_threshold = self.param_vars['fft_energy_ratio_threshold'].get()
+            self.monitor.app_config.lowpass_cutoff = self.param_vars['lowpass_cutoff'].get()
+            self.monitor.app_config.lowpass_filter_order = self.param_vars['lowpass_filter_order'].get()
+            self.monitor.app_config.residual_threshold = self.param_vars['residual_threshold'].get()
+            self.monitor.app_config.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
+
+            # Also update the graph viewer's reference
+            self.graph_viewer.app_config = self.monitor.app_config
+
+            if self.verbose_logging_on.get():
+                logger.info(f"Parameters updated live: FFT_cut={self.monitor.app_config.fft_cutoff_frequency:.3f}, "
+                           f"FFT_thr={self.monitor.app_config.fft_energy_ratio_threshold:.4f}, "
+                           f"LP_cut={self.monitor.app_config.lowpass_cutoff:.3f}")
+        except tk.TclError as e:
+            logger.warning(f"Invalid parameter value: {e}")
 
     def update_feedback_panel(self, result: FrameAnalysisResult):
         self.root.after(0, self._update_feedback_ui, result)
@@ -2457,7 +3189,7 @@ class MonitorControlGUI:
         if not path:
             return
         self.config_path.set(path)
-        self.monitor.update_config(path) 
+        self.monitor.update_config(path)
         try:
             self.sample_frequency.set(round(1.0 / self.monitor.app_config.screenshot_interval, 2))
         except (ZeroDivisionError, TypeError, AttributeError):
@@ -2467,10 +3199,41 @@ class MonitorControlGUI:
             self._toggle_overlay()
         self.status_label.config(text=f"Loaded: {os.path.basename(path)}")
         self._update_manual_points_state()
+        self._sync_param_ui_from_config()  # Sync parameter UI
+
+    def _sync_param_ui_from_config(self):
+        """Sync parameter UI variables from current monitor config."""
+        cfg = self.monitor.app_config
+        self.param_vars['fft_cutoff_frequency'].set(cfg.fft_cutoff_frequency)
+        self.param_vars['fft_energy_ratio_threshold'].set(cfg.fft_energy_ratio_threshold)
+        self.param_vars['lowpass_cutoff'].set(cfg.lowpass_cutoff)
+        self.param_vars['lowpass_filter_order'].set(cfg.lowpass_filter_order)
+        self.param_vars['residual_threshold'].set(cfg.residual_threshold)
+        self.param_vars['exceedance_ratio_threshold'].set(cfg.exceedance_ratio_threshold)
     
     def _launch_config_tool(self):
         self.root.iconify()
-        ConfigToolWindow(self.root, self.root).grab_set()
+
+        # Pass current config path if one is loaded
+        current_path = self.config_path.get() if os.path.exists(self.config_path.get()) else None
+
+        config_tool = ConfigToolWindow(self.root, self.root, preload_config_path=current_path)
+        config_tool.grab_set()
+        config_tool.wait_window()
+
+        # If config was saved, reload it
+        if config_tool.saved_config_path:
+            self.config_path.set(config_tool.saved_config_path)
+            self.monitor.update_config(config_tool.saved_config_path)
+            self._update_manual_points_state()
+            self._sync_param_ui_from_config()
+            # Update sample frequency from loaded config
+            try:
+                self.sample_frequency.set(round(1.0 / self.monitor.app_config.screenshot_interval, 2))
+            except (ZeroDivisionError, TypeError):
+                pass
+
+        self.root.deiconify()
         
     def _toggle_monitoring(self):
         if self.is_monitoring.get():
@@ -2544,6 +3307,52 @@ class MonitorControlGUI:
 
 # --- 7. APPLICATION ENTRY POINT ---
 if __name__ == "__main__":
-    main_root = tk.Tk()
-    app = MonitorControlGUI(main_root)
-    main_root.mainloop()
+    import sys
+
+    # Create hidden root for startup dialog
+    temp_root = tk.Tk()
+    temp_root.withdraw()
+
+    # Ensure configs directory exists
+    if not os.path.exists("configs"):
+        os.makedirs("configs")
+
+    # Show startup dialog
+    startup = StartupDialog(temp_root)
+    startup_result = startup.result  # Store result before destroying
+
+    if startup_result is None:
+        # User cancelled - exit application
+        temp_root.destroy()
+        sys.exit(0)
+    elif startup_result == "NEW_CALIBRATION":
+        # Destroy temp root, create new root for config tool
+        temp_root.destroy()
+
+        main_root = tk.Tk()
+        main_root.withdraw()  # Hide main GUI initially
+
+        # Open config tool for new calibration
+        config_tool = ConfigToolWindow(main_root, main_root, is_new_calibration=True)
+        config_tool.wait_window()
+
+        # After config tool closes, check if a config was saved
+        saved_path = config_tool.saved_config_path  # Store before any potential issues
+
+        if saved_path and os.path.exists(saved_path):
+            # Load the saved config into main GUI and show
+            main_root.deiconify()
+            app = MonitorControlGUI(main_root, config_path=saved_path)
+            main_root.mainloop()
+        else:
+            # No config was saved - exit
+            main_root.destroy()
+            sys.exit(0)
+    else:
+        # Config file selected
+        config_path = startup_result  # Store the path
+        temp_root.destroy()
+
+        main_root = tk.Tk()
+        app = MonitorControlGUI(main_root, config_path=config_path)
+        main_root.mainloop()
