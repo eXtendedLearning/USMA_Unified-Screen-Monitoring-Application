@@ -31,48 +31,26 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 * **Continuous Logging Mode** - New "Log on Events Only" toggle allows continuous image/log output every ~1 second for HSV debugging.
 * **Enhanced Config Loading** - Detailed debug logging when loading configs to diagnose HSV calibration issues.
 
-### v0.4.5
+### v0.4
 
 * **Performance: Faster Screen Capture** - Switched from pyautogui to mss library for 2-5x faster screen capture using native OS APIs (BitBlt on Windows). Falls back to pyautogui automatically if mss is unavailable.
 * **Compatibility: DPI Awareness** - Added explicit DPI awareness declaration for correct operation on Windows 10/11 with display scaling (125%, 150%, etc.). Fixes coordinate offset issues and blurry GUI rendering on high-DPI displays.
 * **Robustness: Tesseract Path Fallback** - Application now checks system PATH for Tesseract if the bundled version is not found, enabling graceful degradation.
 * **Code Quality** - Refactored plotting functions to reduce code duplication.
-
-### v0.4.4
-
 * **Lowpass Residual Analysis** - Added alternative classification method using time-domain residual analysis with Butterworth lowpass filter. All analysis performed in physical units (g/N) for direct comparison with TestLab signals.
-* **Dual Classification System**:
-  - Both methods flagging = **BAD HIT** (Red)
-  - One method flagging = **SUSPECT** (Orange)
-  - Neither flagging = **GOOD HIT** (Green)
+* **Dual Classification System**
 * **Live Graph Viewer** - New central panel with matplotlib canvas featuring:
-  - Signal plot, FFT spectrum, Lowpass comparison, Residual analysis
-  - Hit navigation to browse through recorded hits
-  - Plot type selector to switch visualization modes
-  - Run Summary bar chart (updated after each hit)
 * **Improved OCR Robustness** - Enhanced preprocessing with multiple attempts, morphological operations, and better regex patterns.
 * **Organized Image Logging** - Separate folders for each image type (ROIs, ColorMasks, Signals, FFT, Lowpass, Residual, Summary, OCRs).
 * **Enhanced Verbose Logging** - Includes OCR values and classification reasoning.
 * **BUGFIX** - Fixed memory leak from matplotlib figures in background thread.
 * **BUGFIX** - Fixed GDI resource exhaustion from hit_history accumulation.
-
-### v0.4.3
-
 * **Fixed Dataset 58 Format** - Corrected UNV file header to comply with universal file format specification.
 * **Enhanced FFT Plots** - Added comprehensive analysis information including total energy, high-frequency energy, energy ratio, and cutoff frequency.
-
-### v0.4.2
-
 * **Production Logging** - Removed OCR diagnostic images from logs. Image logging for 'ROI Screenshot' and 'Color Filter Mask' now only saves images related to 'wave' regions.
 * **Portable Setup** - Implemented logic to dynamically locate the Tesseract OCR engine in the relative `external/tesseract` directory.
-
-### v0.4.1
-
 * **Portability and Installation Wizard** - Removed hardcoded path to `tesseract.exe`. App now finds Tesseract from system PATH.
 * `RUN_monitor.bat` is now an installation wizard that automatically sets up the virtual environment.
-
-### v0.4.0
-
 * **OCR Integration** - Added pytesseract for text extraction from screen regions.
 * **New Region Types** - Added status, overload, run, hammer, and response regions.
 * **Standard-Compliant UNV Headers** - Added UFF Type 18 and mapped points to UFF Type 58.
@@ -210,32 +188,6 @@ The HSV calibration window (accessible via "Calibrate Color Filter" in Config To
 - `lowpass_filter_order` - Butterworth filter order (default: 4)
 - `residual_threshold` - Amplitude threshold in physical units (default: 0.005)
 - `exceedance_ratio_threshold` - Allowable exceedance ratio (default: 0.05)
-
----
-
-## Debugging HSV Issues
-
-If signal detection is not working correctly:
-
-1. **Enable continuous logging:**
-   - Check "Enable Image Logs" and select "ROI Screenshots" + "Color Masks"
-   - Uncheck "Log on Events Only" (under Controls)
-   - Start monitoring
-
-2. **Check the output:**
-   - Images will save every ~1 second to `image_logs/`
-   - Look at `ColorMasks/` folder to see what the HSV filter is detecting
-   - If mask is mostly white, HSV range is too broad
-   - If mask is mostly black, HSV range is too narrow or wrong color
-
-3. **Check the Console tab:**
-   - Shows live logging including HSV values being used
-   - Will warn if `hsv_lower`/`hsv_upper` are missing from config
-
-4. **Re-calibrate:**
-   - Open Config Tool and click "Calibrate Color Filter"
-   - Adjust sliders until only the signal line appears in the mask
-   - Save configuration
 
 ---
 
