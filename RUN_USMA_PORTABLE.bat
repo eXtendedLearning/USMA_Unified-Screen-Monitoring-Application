@@ -1,10 +1,10 @@
 @echo off
-TITLE USMA v0.5.0 - Portable Launcher
+TITLE USMA v0.5.1 - Portable Launcher
 
 cd /d "%~dp0"
 
 echo ========================================
-echo USMA v0.5.0 - Portable Edition
+echo USMA v0.5.1 - Portable Edition
 echo ========================================
 echo.
 

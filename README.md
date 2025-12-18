@@ -1,6 +1,6 @@
-# USMA (Unified Screen Monitoring Application) - v0.5.0 (Calibration Release)
+# USMA (Unified Screen Monitoring Application) - v0.5.1 (FRF ROI Release)
 
-A professional-grade GUI application for real-time screen monitoring, signal analysis, and Optical Character Recognition (OCR) designed for modal analysis workflows. USMA captures screen regions, reconstructs FRF signals, performs dual-method quality classification, and exports data in industry-standard formats.
+A professional-grade GUI application for real-time screen monitoring, signal analysis, and Optical Character Recognition (OCR) designed for modal analysis workflows. USMA captures screen regions, reconstructs FRF signals, performs dual-method quality classification, and exports data in industry-standard UNV Dataset 58 format.
 
 ---
 
@@ -10,52 +10,50 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 - **HSV Color Filter Calibration** - Live preview window for tuning color detection
 - **Real-time Screen Monitoring** - Fast capture using native OS APIs (mss library)
 - **Dual Classification System** - FFT energy ratio + Lowpass residual analysis
-- **Live Graph Viewer** - Interactive signal visualization with hit navigation and console output
+- **Split-View Interface** - Live graph and console output displayed side-by-side
+- **Verbose Logging Options** - Selective debug output (config values, mask debug, OCR, FFT, etc.)
 - **OCR Integration** - Automatic extraction of test metadata (Run, Points, Direction)
-- **Industry-Standard Export** - UNV Dataset 58 and MATLAB .mat file formats
+- **Industry-Standard Export** - UNV Dataset 58 file format
 - **Fully Portable** - No installation required, runs from USB drive
 
 ---
 
 ## Version History
 
-### v0.5.0 (Current Release - Calibration Release)
+### v0.5.1 (Current Release - FRF ROI Release)
 
-* **Startup Dialog** - Application now shows config selection or new calibration prompt at launch for improved first-time user experience.
-* **HSV Color Filter Calibration** - New dedicated window with live preview for tuning HSV color filter parameters. Accessible from Config Tool when wave regions are defined.
-* **Mandatory ROI Type Selection** - Drawing a new region now requires explicit type selection via dialog instead of defaulting to 'wave'.
-* **Pre-load Config in Editor** - Opening Edit Config from main GUI with a loaded config now pre-loads that config for modification.
-* **Live Analysis Parameters** - Global analysis parameters (FFT cutoff, thresholds, lowpass settings) moved to main GUI for real-time adjustment during monitoring.
-* **Scrollable Main GUI** - Main window now has scrollbars to ensure all controls are accessible on smaller screens.
-* **Embedded Console** - Graph Viewer now includes a Console tab showing live verbose logging output.
-* **Continuous Logging Mode** - New "Log on Events Only" toggle allows continuous image/log output every ~1 second for HSV debugging.
-* **Enhanced Config Loading** - Detailed debug logging when loading configs to diagnose HSV calibration issues.
+* **FRF ROI Renamed** - "Wave" ROI type renamed to "FRF" for clarity (future versions will include other reconstructed signal types)
+* **Removed .mat Export** - MATLAB .mat export removed; UNV Dataset 58 is now the sole export format
+* **Split-View Interface** - Live graph and console now displayed side-by-side with resizable divider (replaces tabbed view)
+* **Verbose Logging Options** - New expandable menu for selective verbose logging:
+  - Config Values (HSV filter parameters)
+  - Mask Debug (pixel statistics)
+  - OCR Output (recognition results)
+  - FFT Data (energy calculations)
+  - Lowpass Data (filter results)
+  - Classification (hit quality decisions)
+  - File Saves (export confirmations)
+
+### v0.5.0 (Calibration Release)
+
+* **Startup Dialog** - Application now shows config selection or new calibration prompt at launch
+* **HSV Color Filter Calibration** - New dedicated window with live preview for tuning HSV color filter parameters
+* **Mandatory ROI Type Selection** - Drawing a new region now requires explicit type selection via dialog
+* **Pre-load Config in Editor** - Opening Edit Config with a loaded config pre-loads that config for modification
+* **Live Analysis Parameters** - Global analysis parameters moved to main GUI for real-time adjustment
+* **Scrollable Main GUI** - Main window now has scrollbars for smaller screens
+* **Embedded Console** - Graph Viewer includes console output (now split-view in v0.5.1)
+* **Continuous Logging Mode** - "Log on Events Only" toggle allows continuous output for HSV debugging
 
 ### v0.4
 
-* **Performance: Faster Screen Capture** - Switched from pyautogui to mss library for 2-5x faster screen capture using native OS APIs (BitBlt on Windows). Falls back to pyautogui automatically if mss is unavailable.
-* **Compatibility: DPI Awareness** - Added explicit DPI awareness declaration for correct operation on Windows 10/11 with display scaling (125%, 150%, etc.). Fixes coordinate offset issues and blurry GUI rendering on high-DPI displays.
-* **Robustness: Tesseract Path Fallback** - Application now checks system PATH for Tesseract if the bundled version is not found, enabling graceful degradation.
-* **Code Quality** - Refactored plotting functions to reduce code duplication.
-* **Lowpass Residual Analysis** - Added alternative classification method using time-domain residual analysis with Butterworth lowpass filter. All analysis performed in physical units (g/N) for direct comparison with TestLab signals.
-* **Dual Classification System**
-* **Live Graph Viewer** - New central panel with matplotlib canvas featuring:
-* **Improved OCR Robustness** - Enhanced preprocessing with multiple attempts, morphological operations, and better regex patterns.
-* **Organized Image Logging** - Separate folders for each image type (ROIs, ColorMasks, Signals, FFT, Lowpass, Residual, Summary, OCRs).
-* **Enhanced Verbose Logging** - Includes OCR values and classification reasoning.
-* **BUGFIX** - Fixed memory leak from matplotlib figures in background thread.
-* **BUGFIX** - Fixed GDI resource exhaustion from hit_history accumulation.
-* **Fixed Dataset 58 Format** - Corrected UNV file header to comply with universal file format specification.
-* **Enhanced FFT Plots** - Added comprehensive analysis information including total energy, high-frequency energy, energy ratio, and cutoff frequency.
-* **Production Logging** - Removed OCR diagnostic images from logs. Image logging for 'ROI Screenshot' and 'Color Filter Mask' now only saves images related to 'wave' regions.
-* **Portable Setup** - Implemented logic to dynamically locate the Tesseract OCR engine in the relative `external/tesseract` directory.
-* **Portability and Installation Wizard** - Removed hardcoded path to `tesseract.exe`. App now finds Tesseract from system PATH.
-* `RUN_monitor.bat` is now an installation wizard that automatically sets up the virtual environment.
-* **OCR Integration** - Added pytesseract for text extraction from screen regions.
-* **New Region Types** - Added status, overload, run, hammer, and response regions.
-* **Standard-Compliant UNV Headers** - Added UFF Type 18 and mapped points to UFF Type 58.
-* **Dynamic Filenaming** - Log files named using parsed points info (e.g., `FRF_P1P3_1.mot`).
-* **Manual POI Entry** - Added GUI option for manual entry of Hammer/Response points.
+* **Performance: Faster Screen Capture** - Switched from pyautogui to mss library for 2-5x faster capture
+* **Compatibility: DPI Awareness** - Added explicit DPI awareness for Windows 10/11 with display scaling
+* **Lowpass Residual Analysis** - Added alternative classification method using Butterworth lowpass filter
+* **Dual Classification System** - Combined FFT and Lowpass methods for robust hit quality assessment
+* **Live Graph Viewer** - Central panel with matplotlib canvas and hit navigation
+* **Organized Image Logging** - Separate folders for each image type
+* **Fixed Dataset 58 Format** - Corrected UNV file header to comply with universal file format specification
 
 ---
 
@@ -64,20 +62,20 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 1. **Extract all files** to the same folder:
    ```
    USMA/
-   ├── RUN_PORTABLE.bat      <- Double-click to start
+   ├── RUN_USMA_PORTABLE.bat   <- Double-click to start
    ├── monitor_app.py
    ├── requirements.txt
-   ├── python/               <- Portable Python 3.11.9
-   └── external/tesseract/   <- Portable Tesseract OCR
+   ├── python/                  <- Portable Python 3.11.9
+   └── external/tesseract/      <- Portable Tesseract OCR
    ```
 
-2. **Double-click:** `RUN_PORTABLE.bat`
+2. **Double-click:** `RUN_USMA_PORTABLE.bat`
 
 3. **First Launch:** Choose to load existing config or create new calibration
 
 4. **New Calibration Workflow:**
    - Take screenshot in Config Tool
-   - Draw regions and select their types
+   - Draw regions and select their types (FRF for signal regions)
    - Click "Calibrate Color Filter" to tune HSV values with live preview
    - Save configuration
 
@@ -89,16 +87,12 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 
 ```
 USMA/
-├── RUN_PORTABLE.bat        - Portable launcher (START HERE)
-├── RUN_monitor.bat         - Development launcher (requires Python installed)
+├── RUN_USMA_PORTABLE.bat   - Portable launcher (START HERE)
 ├── monitor_app.py          - Main application
 ├── requirements.txt        - Python dependencies
 │
 ├── python/                 - Portable Python 3.11.9 with all dependencies
-│   └── Lib/site-packages/  - Includes mss, numpy, opencv, matplotlib, etc.
-│
-├── external/
-│   └── tesseract/          - Portable Tesseract OCR engine
+├── external/tesseract/     - Portable Tesseract OCR engine
 │
 ├── configs/                - Configuration files (JSON)
 ├── logs/                   - Application logs
@@ -111,7 +105,7 @@ USMA/
 │   ├── Residual/
 │   ├── Summary/
 │   └── OCRs/
-└── signal_logs/            - Data files (.mat, .unv)
+└── signal_logs/            - Data files (.unv)
 ```
 
 ---
@@ -160,7 +154,7 @@ USMA uses a dual-method classification approach for robust hit quality assessmen
 
 | Type | Purpose |
 |------|---------|
-| `wave` | Signal capture region (FRF plot area) |
+| `frf` | Signal capture region (FRF plot area) |
 | `status` | System status text (Waiting/Measuring/Ready) |
 | `overload` | Overload indicator region |
 | `run` | Run number text |
@@ -177,32 +171,26 @@ The HSV calibration window (accessible via "Calibrate Color Filter" in Config To
 
 **Tip:** For best results, the mask should show only the signal line as white pixels, with everything else black.
 
-### Analysis Parameters
+### Verbose Logging Options
 
-**FFT Method:**
-- `fft_cutoff_frequency` - Normalized frequency threshold (default: 0.09)
-- `fft_energy_ratio_threshold` - Energy ratio limit (default: 0.013)
-
-**Lowpass Method:**
-- `lowpass_cutoff` - Filter cutoff frequency (default: 0.05)
-- `lowpass_filter_order` - Butterworth filter order (default: 4)
-- `residual_threshold` - Amplitude threshold in physical units (default: 0.005)
-- `exceedance_ratio_threshold` - Allowable exceedance ratio (default: 0.05)
+Enable/disable specific logging categories:
+- **Config Values** - HSV filter parameters logged periodically
+- **Mask Debug** - Pixel statistics for color mask analysis
+- **OCR Output** - Recognition results from text regions
+- **FFT Data** - Energy calculations and frequency analysis
+- **Lowpass Data** - Filter coefficients and residual statistics
+- **Classification** - Hit quality decision reasoning
+- **File Saves** - Confirmation of exported files
 
 ---
 
-## Output Formats
+## Output Format
 
 ### UNV Dataset 58
 - Industry-standard universal file format
 - Compatible with: LMS TestLab, Siemens Simcenter, pyuff, MATLAB
 - Contains complete header with DOF identification
 - Real + Imaginary data pairs (imaginary = 0 for reconstructed signals)
-
-### MATLAB .mat
-- Contains all signal data and metadata
-- Includes both raw (pixel) and scaled (physical) amplitudes
-- FFT and Lowpass analysis results embedded
 
 ---
 
@@ -221,40 +209,11 @@ Check `run_log.txt` for detailed error messages.
 ### HSV calibration not saving
 - Ensure you click "Apply" in the HSV Calibration window
 - Save the config after applying HSV changes
-- Check Console tab for "Config loaded - HSV Lower/Upper" messages
-
-### GUI appears blurry or coordinates are offset
-This was fixed in v0.4.5 with DPI awareness. If still occurring:
-1. Right-click `RUN_PORTABLE.bat` then Properties then Compatibility
-2. Click "Change high DPI settings"
-3. Check "Override high DPI scaling behavior"
-4. Select "Application" from dropdown
-
-### OCR not reading text correctly
-1. Ensure region boundaries tightly crop the text
-2. Try different region sizes (OCR works best with clear, high-contrast text)
-3. Check `image_logs/OCRs/` for preprocessing diagnostic images
-4. Consider using Manual POI Entry as fallback
+- Check Console output for "Config loaded - HSV Lower/Upper" messages
 
 ### Memory usage grows over time
 - Hit history is limited to 25 entries in the graph viewer
 - Restart application for very long sessions (500+ hits)
-
----
-
-## Development Setup
-
-For development without the portable bundle:
-
-1. Install Python 3.11+
-2. Install Tesseract OCR and add to PATH
-3. Create virtual environment:
-   ```batch
-   python -m venv sm_venv
-   sm_venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-4. Run: `python monitor_app.py`
 
 ---
 
@@ -283,20 +242,11 @@ For development without the portable bundle:
 
 ---
 
-## Future Updates
-
-1. Intelligent threshold suggestion based on labeled training hits
-2. Batch reprocessing of saved signals
-3. Network streaming for remote monitoring
-4. Integration with TestLab API (if available)
-
----
-
 ## Version Information
 
 | Component | Version |
 |-----------|---------|
-| USMA | 0.5.0 |
+| USMA | 0.5.1 |
 | Python | 3.11.9 (Portable) |
 | Tesseract | 5.x (Portable) |
 | Package Size | ~350 MB |
@@ -310,8 +260,7 @@ Internal tool for modal analysis workflow optimization.
 ## Support
 
 For issues:
-1. Check `run_log.txt` and `logs/monitor_app.log`
-2. Check Console tab in Graph Viewer for live debug info
-3. Verify all folders are present
+1. Check `logs/monitor_app.log` for errors
+2. Check Console panel (right side of Live Graph) for live debug info
+3. Enable specific verbose log options to diagnose issues
 4. Test with a minimal configuration first
-5. Report issues with log files attached

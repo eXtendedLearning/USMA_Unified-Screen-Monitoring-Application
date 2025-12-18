@@ -17,12 +17,12 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v0.5.0 (Calibration Release)
+USMA (Unified Screen Monitoring Application) - v0.5.1 (FRF ROI Release)
 
 A professional-grade GUI application for real-time screen monitoring, signal
 analysis, and OCR designed for modal analysis workflows. Captures screen regions,
 reconstructs FRF signals, performs dual-method quality classification (FFT +
-Lowpass), and exports data in industry-standard formats (UNV Dataset 58, MATLAB).
+Lowpass), and exports data in industry-standard formats (UNV Dataset 58).
 
 Key Features:
 - Startup dialog for config selection or new calibration workflow
@@ -35,7 +35,7 @@ Key Features:
 - Dual classification: FFT energy ratio + Lowpass residual analysis
 - Live graph viewer with hit navigation and multiple plot types
 - Organized image logging (ROIs, Masks, Signals, FFT, Lowpass, Residual)
-- UNV Dataset 58 and MATLAB .mat export formats
+- UNV Dataset 58 export format
 - DPI-aware rendering for high-resolution displays
 - Fast screen capture via mss library with pyautogui fallback
 
@@ -70,7 +70,7 @@ from contextlib import contextmanager
 from PIL import Image, ImageTk
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import butter, filtfilt
-import scipy.io
+# scipy.io removed - .mat export deprecated
 import matplotlib
 matplotlib.use('TkAgg')  # For the embedded viewer only
 import matplotlib.pyplot as plt
@@ -186,8 +186,18 @@ class ImageLogOptions:
     include_ocr_images: bool = False
 
 @dataclass
+class VerboseLogOptions:
+    """Options for verbose console logging categories."""
+    log_config_values: bool = True
+    log_mask_debug: bool = True
+    log_ocr_output: bool = True
+    log_fft_data: bool = True
+    log_lowpass_data: bool = True
+    log_classification: bool = True
+    log_file_saves: bool = True
+
+@dataclass
 class DataLogOptions:
-    log_mat: bool = False
     log_unv: bool = False
 
 @dataclass
@@ -219,7 +229,7 @@ class MonitoringRegion:
     ref_dof: int = field(default=3)
 
 @dataclass
-class WaveAnalysisResult:
+class FRFAnalysisResult:
     """Extended to include lowpass residual analysis results in physical units."""
     is_high_frequency: bool
     energy_ratio: float
@@ -262,7 +272,7 @@ class LightweightHitData:
 @dataclass
 class FrameAnalysisResult:
     """Holds all analysis results from a single captured frame."""
-    wave_results: Dict[str, WaveAnalysisResult] = field(default_factory=dict)
+    frf_results: Dict[str, FRFAnalysisResult] = field(default_factory=dict)
     active_regions: Dict[str, MonitoringRegion] = field(default_factory=dict)
     status_text: str = "Unknown"
     overload_text: str = "Unknown"
@@ -340,6 +350,7 @@ class ScreenMonitor:
         self.image_logging_enabled = True
         self.image_log_options = ImageLogOptions()
         self.data_log_options = DataLogOptions()
+        self.verbose_log_options = VerboseLogOptions()
         self.last_logged_ratio: Optional[float] = None
         self.last_logged_energy: Optional[float] = None
         self.audio_feedback_enabled = False
@@ -386,8 +397,8 @@ class ScreenMonitor:
             # pyautogui returns RGB PIL Image, convert to BGR numpy array
             return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
-    def start(self, verbose_logging=True, image_logging=True, image_log_options=None, 
-              data_log_options=None, manual_points=None):
+    def start(self, verbose_logging=True, image_logging=True, image_log_options=None,
+              data_log_options=None, verbose_log_options=None, manual_points=None):
         if not self.app_config.regions:
             messagebox.showerror("Error", "Cannot start. Please load a valid configuration.")
             return False
@@ -398,6 +409,7 @@ class ScreenMonitor:
         self.image_logging_enabled = image_logging
         self.image_log_options = image_log_options if image_log_options else ImageLogOptions()
         self.data_log_options = data_log_options if data_log_options else DataLogOptions()
+        self.verbose_log_options = verbose_log_options if verbose_log_options else VerboseLogOptions()
         self.manual_points_info = manual_points
         self.frame_count = 0
         self.last_logged_ratio = None
@@ -571,10 +583,10 @@ class ScreenMonitor:
             
             all_rois[name] = roi.copy()
             
-            if region.roi_type == 'wave':
+            if region.roi_type == 'frf':
                 analysis_result = self._analyze_wave_pattern(roi, region)
                 if analysis_result:
-                    frame_result.wave_results[name] = analysis_result
+                    frame_result.frf_results[name] = analysis_result
                     frame_result.active_regions[name] = region
             elif OCR_AVAILABLE:
                 if region.roi_type == 'status':
@@ -623,20 +635,20 @@ class ScreenMonitor:
         if not ocr_points_active and self.manual_points_info:
             frame_result.points_info = self.manual_points_info
 
-        if frame_result.wave_results:
-            classifications = [res.is_high_frequency for res in frame_result.wave_results.values()]
+        if frame_result.frf_results:
+            classifications = [res.is_high_frequency for res in frame_result.frf_results.values()]
             frame_result.overall_is_hf = sum(classifications) > len(classifications) / 2 if classifications else False
-            frame_result.avg_energy_ratio = np.mean([res.energy_ratio for res in frame_result.wave_results.values()])
-            frame_result.avg_high_freq_energy = np.mean([res.high_freq_energy for res in frame_result.wave_results.values()])
-            frame_result.avg_exceedance_count = np.mean([res.exceedance_count for res in frame_result.wave_results.values()])
-            frame_result.avg_exceedance_ratio = np.mean([res.exceedance_ratio for res in frame_result.wave_results.values()])
-            lp_classifications = [res.lowpass_is_bad_hit for res in frame_result.wave_results.values()]
+            frame_result.avg_energy_ratio = np.mean([res.energy_ratio for res in frame_result.frf_results.values()])
+            frame_result.avg_high_freq_energy = np.mean([res.high_freq_energy for res in frame_result.frf_results.values()])
+            frame_result.avg_exceedance_count = np.mean([res.exceedance_count for res in frame_result.frf_results.values()])
+            frame_result.avg_exceedance_ratio = np.mean([res.exceedance_ratio for res in frame_result.frf_results.values()])
+            lp_classifications = [res.lowpass_is_bad_hit for res in frame_result.frf_results.values()]
             frame_result.overall_lowpass_bad = sum(lp_classifications) > len(lp_classifications) / 2 if lp_classifications else False
         
         return frame_result, all_rois
 
     def _handle_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
-        if not frame_result.wave_results:
+        if not frame_result.frf_results:
             return
 
         has_changed = (frame_result.avg_energy_ratio is not None and 
@@ -683,40 +695,38 @@ class ScreenMonitor:
             if self.current_run not in self.run_history:
                 self.run_history[self.current_run] = {}
             
-            for wave_name, wave_result in frame_result.wave_results.items():
-                base_filename = f"{wave_name}_{counter_key}_{current_hit}"
-                region = frame_result.active_regions[wave_name]
+            for frf_name, frf_result in frame_result.frf_results.items():
+                base_filename = f"{frf_name}_{counter_key}_{current_hit}"
+                region = frame_result.active_regions[frf_name]
                 
                 self.run_history[self.current_run][hit_key] = {
-                    'exceedance_count': wave_result.exceedance_count,
-                    'exceedance_ratio': wave_result.exceedance_ratio,
-                    'energy_ratio': wave_result.energy_ratio,
-                    'is_hf': wave_result.is_high_frequency,
-                    'lowpass_bad': wave_result.lowpass_is_bad_hit
+                    'exceedance_count': frf_result.exceedance_count,
+                    'exceedance_ratio': frf_result.exceedance_ratio,
+                    'energy_ratio': frf_result.energy_ratio,
+                    'is_hf': frf_result.is_high_frequency,
+                    'lowpass_bad': frf_result.lowpass_is_bad_hit
                 }
                 
                 if self.image_logging_enabled: 
-                    self._create_visual_logs(wave_result, frame_result, wave_name, base_filename, all_rois)
-                if self.data_log_options.log_mat: 
-                    self._save_mat_log(wave_result, frame_result, wave_name, base_filename)
+                    self._create_visual_logs(frf_result, frame_result, frf_name, base_filename, all_rois)
                 if self.data_log_options.log_unv: 
-                    self._save_unv_log(wave_result, frame_result, wave_name, base_filename)
+                    self._save_unv_log(frf_result, frame_result, frf_name, base_filename)
                 
                 if self.plot_callback:
                     # Create lightweight copy for plot callback
                     lightweight_data = LightweightHitData(
-                        signal_physical=wave_result.signal_physical.copy() if wave_result.signal_physical is not None else np.array([]),
-                        filtered_physical=wave_result.filtered_physical.copy() if wave_result.filtered_physical is not None else None,
-                        residual_physical=wave_result.residual_physical.copy() if wave_result.residual_physical is not None else None,
-                        fft_freqs=wave_result.fft_freqs.copy(),
-                        fft_mags=wave_result.fft_mags.copy(),
-                        energy_ratio=wave_result.energy_ratio,
-                        is_high_frequency=wave_result.is_high_frequency,
-                        exceedance_count=wave_result.exceedance_count,
-                        exceedance_ratio=wave_result.exceedance_ratio,
-                        lowpass_is_bad_hit=wave_result.lowpass_is_bad_hit,
-                        total_energy=wave_result.total_energy,
-                        high_freq_energy=wave_result.high_freq_energy,
+                        signal_physical=frf_result.signal_physical.copy() if frf_result.signal_physical is not None else np.array([]),
+                        filtered_physical=frf_result.filtered_physical.copy() if frf_result.filtered_physical is not None else None,
+                        residual_physical=frf_result.residual_physical.copy() if frf_result.residual_physical is not None else None,
+                        fft_freqs=frf_result.fft_freqs.copy(),
+                        fft_mags=frf_result.fft_mags.copy(),
+                        energy_ratio=frf_result.energy_ratio,
+                        is_high_frequency=frf_result.is_high_frequency,
+                        exceedance_count=frf_result.exceedance_count,
+                        exceedance_ratio=frf_result.exceedance_ratio,
+                        lowpass_is_bad_hit=frf_result.lowpass_is_bad_hit,
+                        total_energy=frf_result.total_energy,
+                        high_freq_energy=frf_result.high_freq_energy,
                         y_axis_unit=region.y_axis_unit,
                         x_axis_min=region.x_axis_min,
                         x_axis_max=region.x_axis_max,
@@ -739,7 +749,7 @@ class ScreenMonitor:
             logger.info(f"  HSV Lower: {self.app_config.hsv_lower}")
             logger.info(f"  HSV Upper: {self.app_config.hsv_upper}")
             logger.info(f"  Status: '{frame_result.status_text}'")
-            logger.info(f"  Wave Results: {len(frame_result.wave_results)} regions detected")
+            logger.info(f"  Wave Results: {len(frame_result.frf_results)} regions detected")
             if frame_result.avg_energy_ratio is not None:
                 logger.info(f"  Avg Energy Ratio: {frame_result.avg_energy_ratio:.3e}")
                 logger.info(f"  Avg Exceedance: {frame_result.avg_exceedance_count}")
@@ -747,7 +757,7 @@ class ScreenMonitor:
         # Save images for all wave regions regardless of detection
         if self.image_logging_enabled:
             for region_name, region in self.app_config.regions.items():
-                if region.roi_type == 'wave' and region.enabled:
+                if region.roi_type == 'frf' and region.enabled:
                     if region_name in all_rois:
                         roi = all_rois[region_name]
                         
@@ -1092,12 +1102,12 @@ class ScreenMonitor:
         ratio = count / len(residual) if len(residual) > 0 else 0.0
         return int(count), ratio
 
-    def _analyze_wave_pattern(self, roi: np.ndarray, region: MonitoringRegion) -> Optional[WaveAnalysisResult]:
+    def _analyze_wave_pattern(self, roi: np.ndarray, region: MonitoringRegion) -> Optional[FRFAnalysisResult]:
         if roi.size == 0:
             return None
         
         # Debug: Log HSV filter values being used (only when verbose logging enabled)
-        if self.verbose_logging_enabled and self.frame_count % 20 == 0:  # Log every 20th frame to avoid spam
+        if self.verbose_logging_enabled and self.verbose_log_options.log_config_values and self.frame_count % 20 == 0:  # Log every 20th frame to avoid spam
             logger.info(f"[HSV DEBUG] Lower: {self.app_config.hsv_lower}, Upper: {self.app_config.hsv_upper}")
             
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -1163,7 +1173,7 @@ class ScreenMonitor:
         )
         lowpass_is_bad = exceedance_ratio > self.app_config.exceedance_ratio_threshold
         
-        return WaveAnalysisResult(
+        return FRFAnalysisResult(
             is_high_frequency=is_hf,
             energy_ratio=energy_ratio,
             high_freq_energy=high_freq_energy,
@@ -1186,10 +1196,10 @@ class ScreenMonitor:
     # VISUAL LOGGING - THREAD-SAFE (Using Figure directly, not pyplot)
     # =========================================================================
 
-    def _create_visual_logs(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
-                           wave_name: str, base_filename: str, all_rois: Dict[str, np.ndarray]):
+    def _create_visual_logs(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult, 
+                           frf_name: str, base_filename: str, all_rois: Dict[str, np.ndarray]):
         try:
-            region = frame_result.active_regions[wave_name]
+            region = frame_result.active_regions[frf_name]
             
             title_info = (f"{frame_result.points_info.run} | H: {frame_result.points_info.hammer_point}"
                          f"{frame_result.points_info.hammer_dir} R: {frame_result.points_info.response_point}"
@@ -1199,7 +1209,7 @@ class ScreenMonitor:
                 for r_name, r_img in all_rois.items():
                     try:
                         r_type = self.app_config.regions[r_name].roi_type
-                        if r_type == 'wave':
+                        if r_type == 'frf':
                             cv2.imwrite(f"image_logs/ROIs/{base_filename}_{r_name}.jpg", r_img)
                     except KeyError:
                         pass
@@ -1207,22 +1217,22 @@ class ScreenMonitor:
                         logger.error(f"Failed to save ROI image for '{r_name}': {e}")
 
             if self.image_log_options.include_color_filter: 
-                cv2.imwrite(f"image_logs/ColorMasks/{base_filename}_mask.jpg", wave_result.color_mask)
+                cv2.imwrite(f"image_logs/ColorMasks/{base_filename}_mask.jpg", frf_result.color_mask)
             
             if self.image_log_options.include_signal_plot:
-                self._create_signal_plot_safe(wave_result, region, title_info, 
+                self._create_signal_plot_safe(frf_result, region, title_info, 
                                              f"image_logs/Signals/{base_filename}_signal.png")
             
             if self.image_log_options.include_fft_plot:
-                self._create_fft_plot_safe(wave_result, region, title_info, 
+                self._create_fft_plot_safe(frf_result, region, title_info, 
                                           f"image_logs/FFT/{base_filename}_fft.png")
             
             if self.image_log_options.include_lowpass_plot:
-                self._create_lowpass_comparison_plot_safe(wave_result, region, title_info, 
+                self._create_lowpass_comparison_plot_safe(frf_result, region, title_info, 
                                                          f"image_logs/Lowpass/{base_filename}_lowpass.png")
             
             if self.image_log_options.include_residual_plot:
-                self._create_residual_plot_safe(wave_result, region, title_info, 
+                self._create_residual_plot_safe(frf_result, region, title_info, 
                                                f"image_logs/Residual/{base_filename}_residual.png")
             
             if self.image_log_options.include_summary_chart and self.current_run in self.run_history:
@@ -1235,9 +1245,9 @@ class ScreenMonitor:
                         cv2.imwrite(f"image_logs/OCRs/{base_filename}_{ocr_name}.jpg", ocr_img)
                 
         except Exception as e:
-            logger.error(f"Failed to create visual logs for {wave_name}: {e}")
+            logger.error(f"Failed to create visual logs for {frf_name}: {e}")
 
-    def _create_signal_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
+    def _create_signal_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion, 
                                  title_info: str, filename: str):
         """Thread-safe signal plot creation using Figure directly."""
         fig = None
@@ -1248,10 +1258,10 @@ class ScreenMonitor:
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            num_points = len(wave_result.signal_physical)
+            num_points = len(frf_result.signal_physical)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             
-            ax.plot(freq_axis, wave_result.signal_physical, color='cyan', linewidth=1.5)
+            ax.plot(freq_axis, frf_result.signal_physical, color='cyan', linewidth=1.5)
             ax.set_xlabel('Frequency (Hz)', color='white')
             ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
             ax.set_title(f'Reconstructed Signal\n{title_info}', color='white', fontsize=10)
@@ -1270,7 +1280,7 @@ class ScreenMonitor:
                 del fig
             gc.collect()
 
-    def _create_fft_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion, 
+    def _create_fft_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion, 
                               title_info: str, filename: str):
         """Thread-safe FFT plot creation."""
         fig = None
@@ -1281,17 +1291,17 @@ class ScreenMonitor:
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            ax.plot(wave_result.fft_freqs, wave_result.fft_mags, color='magenta', linewidth=1)
+            ax.plot(frf_result.fft_freqs, frf_result.fft_mags, color='magenta', linewidth=1)
             ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
                       linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
             ax.set_xlim(0, 0.5)
             ax.set_xlabel('Normalized Frequency', color='white')
             ax.set_ylabel('Magnitude (A.U.)', color='white')
             
-            fft_info = (f'Total E: {wave_result.total_energy:.2e} | '
-                       f'HF E: {wave_result.high_freq_energy:.2e} | '
-                       f'Ratio: {wave_result.energy_ratio:.3e}')
-            classification = "HF (Bad)" if wave_result.is_high_frequency else "LF (Good)"
+            fft_info = (f'Total E: {frf_result.total_energy:.2e} | '
+                       f'HF E: {frf_result.high_freq_energy:.2e} | '
+                       f'Ratio: {frf_result.energy_ratio:.3e}')
+            classification = "HF (Bad)" if frf_result.is_high_frequency else "LF (Good)"
             ax.set_title(f'FFT Magnitude Spectrum - {classification}\n{title_info}\n{fft_info}', 
                         color='white', fontsize=9)
             
@@ -1311,7 +1321,7 @@ class ScreenMonitor:
                 del fig
             gc.collect()
 
-    def _create_lowpass_comparison_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
+    def _create_lowpass_comparison_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
                                              title_info: str, filename: str):
         """Thread-safe lowpass comparison plot creation."""
         fig = None
@@ -1322,17 +1332,17 @@ class ScreenMonitor:
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            if wave_result.signal_physical is None or wave_result.filtered_physical is None:
+            if frf_result.signal_physical is None or frf_result.filtered_physical is None:
                 ax.text(0.5, 0.5, 'No lowpass data available', 
                        transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
                 fig.savefig(filename, facecolor=fig.get_facecolor())
                 return
             
-            num_points = len(wave_result.signal_physical)
+            num_points = len(frf_result.signal_physical)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             
-            ax.plot(freq_axis, wave_result.signal_physical, 'w-', linewidth=2, label='Original', alpha=0.9)
-            ax.plot(freq_axis, wave_result.filtered_physical, 'g--', linewidth=1.5, label='Lowpass Filtered')
+            ax.plot(freq_axis, frf_result.signal_physical, 'w-', linewidth=2, label='Original', alpha=0.9)
+            ax.plot(freq_axis, frf_result.filtered_physical, 'g--', linewidth=1.5, label='Lowpass Filtered')
             
             filter_info = f'Cutoff: {self.app_config.lowpass_cutoff:.3f} | Order: {self.app_config.lowpass_filter_order}'
             ax.set_title(f'Lowpass Filter Comparison\n{title_info}\n{filter_info}', 
@@ -1355,7 +1365,7 @@ class ScreenMonitor:
                 del fig
             gc.collect()
 
-    def _create_residual_plot_safe(self, wave_result: WaveAnalysisResult, region: MonitoringRegion,
+    def _create_residual_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
                                    title_info: str, filename: str):
         """Thread-safe residual plot creation."""
         fig = None
@@ -1366,29 +1376,29 @@ class ScreenMonitor:
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            if wave_result.residual_physical is None:
+            if frf_result.residual_physical is None:
                 ax.text(0.5, 0.5, 'No residual data available', 
                        transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
                 fig.savefig(filename, facecolor=fig.get_facecolor())
                 return
             
-            num_points = len(wave_result.residual_physical)
+            num_points = len(frf_result.residual_physical)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             threshold = self.app_config.residual_threshold
             
-            ax.plot(freq_axis, wave_result.residual_physical, 'c-', linewidth=1, label='Residual (HF Content)')
+            ax.plot(freq_axis, frf_result.residual_physical, 'c-', linewidth=1, label='Residual (HF Content)')
             ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
             ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5, 
                       label=f'Threshold (±{threshold} {region.y_axis_unit})')
             ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
             
-            exceedances = np.abs(wave_result.residual_physical) > threshold
+            exceedances = np.abs(frf_result.residual_physical) > threshold
             if np.any(exceedances):
-                ax.scatter(freq_axis[exceedances], wave_result.residual_physical[exceedances], 
+                ax.scatter(freq_axis[exceedances], frf_result.residual_physical[exceedances], 
                           c='red', s=15, zorder=5, alpha=0.7)
             
-            classification = "BAD HIT" if wave_result.lowpass_is_bad_hit else "GOOD HIT"
-            residual_info = (f'Exceedances: {wave_result.exceedance_count} ({wave_result.exceedance_ratio:.1%}) | '
+            classification = "BAD HIT" if frf_result.lowpass_is_bad_hit else "GOOD HIT"
+            residual_info = (f'Exceedances: {frf_result.exceedance_count} ({frf_result.exceedance_ratio:.1%}) | '
                             f'Threshold: {self.app_config.exceedance_ratio_threshold:.1%} | {classification}')
             ax.set_title(f'Residual Analysis\n{title_info}\n{residual_info}', 
                         color='white', fontsize=9)
@@ -1462,48 +1472,9 @@ class ScreenMonitor:
     # DATA FILE LOGGING
     # =========================================================================
     
-    def _save_mat_log(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
-                      wave_name: str, base_filename: str):
-        try:
-            filename = f"signal_logs/{base_filename}.mat"
-            region = frame_result.active_regions[wave_name]
-            num_points = len(wave_result.signal_physical)
-            frequency_hz = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
-            points = frame_result.points_info
-            
-            mat_data = {
-                'frequency_hz': frequency_hz,
-                'amplitude': wave_result.signal_physical,
-                'amplitude_units': region.y_axis_unit,
-                'raw_amplitude_pixels': wave_result.signal_vector,
-                'info_region_name': wave_name,
-                'meta_run': points.run,
-                'meta_hammer_point': points.hammer_point,
-                'meta_hammer_dir': points.hammer_dir,
-                'meta_response_point': points.response_point,
-                'meta_response_dir': points.response_dir,
-                'meta_overload_status': frame_result.overload_text,
-                'fft_total_energy': wave_result.total_energy,
-                'fft_high_freq_energy': wave_result.high_freq_energy,
-                'fft_energy_ratio': wave_result.energy_ratio,
-                'fft_cutoff_frequency': self.app_config.fft_cutoff_frequency,
-                'fft_is_hf': wave_result.is_high_frequency,
-                'lowpass_filtered_signal': wave_result.filtered_physical,
-                'lowpass_residual_signal': wave_result.residual_physical,
-                'lowpass_exceedance_count': wave_result.exceedance_count,
-                'lowpass_exceedance_ratio': wave_result.exceedance_ratio,
-                'lowpass_cutoff': self.app_config.lowpass_cutoff,
-                'lowpass_filter_order': self.app_config.lowpass_filter_order,
-                'lowpass_residual_threshold': self.app_config.residual_threshold,
-                'lowpass_exceedance_threshold': self.app_config.exceedance_ratio_threshold,
-                'lowpass_is_bad_hit': wave_result.lowpass_is_bad_hit
-            }
-            scipy.io.savemat(filename, mat_data)
-        except Exception as e:
-            logger.error(f"Failed to save .mat file for {wave_name}: {e}")
 
-    def _save_unv_log(self, wave_result: WaveAnalysisResult, frame_result: FrameAnalysisResult, 
-                      wave_name: str, base_filename: str):
+    def _save_unv_log(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult, 
+                      frf_name: str, base_filename: str):
         def parse_point(point_str: str) -> int: 
             return int(re.sub(r'\D', '', point_str)) if point_str and re.sub(r'\D', '', point_str) else 1
         
@@ -1515,12 +1486,12 @@ class ScreenMonitor:
         
         try:
             filename = f"signal_logs/{base_filename}.unv"
-            region = frame_result.active_regions[wave_name]
+            region = frame_result.active_regions[frf_name]
             points = frame_result.points_info
-            num_points = len(wave_result.signal_physical)
+            num_points = len(frf_result.signal_physical)
             
             if num_points < 2:
-                logger.warning(f"Skipping UNV log for {wave_name}: insufficient data points ({num_points})")
+                logger.warning(f"Skipping UNV log for {frf_name}: insufficient data points ({num_points})")
                 return
             
             start_freq = region.x_axis_min
@@ -1544,7 +1515,7 @@ class ScreenMonitor:
                 
                 f.write(f"{timestamp:<80}\n")
                 
-                id_line4 = f"Reconstructed from {points.run}, region \"{wave_name}\""
+                id_line4 = f"Reconstructed from {points.run}, region \"{frf_name}\""
                 f.write(f"{id_line4[:80]:<80}\n")
                 
                 dir_char = {1: 'X', 2: 'Y', 3: 'Z'}.get(resp_dof, 'Z')
@@ -1590,7 +1561,7 @@ class ScreenMonitor:
                 f.write(f"{13:10d}{0:5d}{0:5d}{0:5d}{'Z-axis':20s}{'NONE':20s}\n")
                 f.write(f"{0:10d}{0:5d}{0:5d}{0:5d}{'NONE':20s}{'NONE':20s}\n")
                 
-                for val in wave_result.signal_physical:
+                for val in frf_result.signal_physical:
                     real_part = val
                     imag_part = 0.0
                     f.write(f"  {real_part:13.6E}  {imag_part:13.6E}\n")
@@ -1600,7 +1571,7 @@ class ScreenMonitor:
             logger.info(f"UNV file saved: {filename}")
             
         except Exception as e: 
-            logger.error(f"Failed to save .unv file for {wave_name}: {e}")
+            logger.error(f"Failed to save .unv file for {frf_name}: {e}")
 
 
 # --- 4. VISUALIZATION & CONFIGURATION ---
@@ -1907,7 +1878,7 @@ class ROITypeDialog(tk.Toplevel):
     Simple dialog to select ROI type after drawing a region.
     """
 
-    ROI_TYPES = ['wave', 'status', 'overload', 'run', 'hammer', 'response']
+    ROI_TYPES = ['frf', 'status', 'overload', 'run', 'hammer', 'response']
 
     def __init__(self, parent, region_name: str):
         super().__init__(parent)
@@ -1935,7 +1906,7 @@ class ROITypeDialog(tk.Toplevel):
         ttk.Label(self, text=f"Select type for region '{self.region_name}':",
                   font=("Segoe UI", 10, "bold")).pack(pady=(20, 15))
 
-        self.type_var = tk.StringVar(value='wave')
+        self.type_var = tk.StringVar(value='frf')
 
         type_frame = ttk.Frame(self)
         type_frame.pack(pady=10)
@@ -1972,12 +1943,12 @@ class RegionOverlay(tk.Toplevel):
                 data = json.load(f)
             canvas = tk.Canvas(self, bg="white", highlightthickness=0)
             canvas.pack(fill=tk.BOTH, expand=True)
-            colors = {"wave": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
+            colors = {"frf": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
                       "run": "#f1c40f", "hammer": "#f39c12", "response": "#e67e22"}
             for name, region_data in data.items():
                 if not name.startswith('_') and region_data.get('enabled', True):
                     x, y, w, h = region_data['x'], region_data['y'], region_data['width'], region_data['height']
-                    color = colors.get(region_data.get('roi_type', 'wave'), "#95a5a6")
+                    color = colors.get(region_data.get('roi_type', 'frf'), "#95a5a6")
                     canvas.create_rectangle(x-5, y-5, x+w+5, y+h+5, outline=color, width=2)
                     canvas.create_text(x-5, y-5, text=name, anchor="sw", font=("Arial", 10, "bold"), fill=color)
             canvas.create_text(self.winfo_screenwidth()-10, self.winfo_screenheight()-10, 
@@ -2118,7 +2089,7 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Entry(f1, textvariable=self.editor_vars['name'], width=15).pack(side=tk.LEFT, padx=2)
         ttk.Label(f1, text="Type:").pack(side=tk.LEFT, padx=(10,0))
         ttk.Combobox(f1, textvariable=self.editor_vars['roi_type'], 
-                     values=['wave', 'status', 'overload', 'run', 'hammer', 'response'], 
+                     values=['frf', 'status', 'overload', 'run', 'hammer', 'response'], 
                      state='readonly', width=10).pack(side=tk.LEFT, padx=2)
         
         f_geom = ttk.Frame(editor_frame)
@@ -2294,7 +2265,7 @@ class ConfigToolWindow(tk.Toplevel):
     def _update_hsv_button_state(self):
         """Enable HSV calibration button only if wave regions exist."""
         wave_regions = {name: r for name, r in self.app_config.regions.items()
-                        if r.roi_type == 'wave'}
+                        if r.roi_type == 'frf'}
         state = tk.NORMAL if wave_regions else tk.DISABLED
         self.hsv_cal_btn.config(state=state)
 
@@ -2305,7 +2276,7 @@ class ConfigToolWindow(tk.Toplevel):
             return
 
         wave_regions = {name: r for name, r in self.app_config.regions.items()
-                        if r.roi_type == 'wave'}
+                        if r.roi_type == 'frf'}
 
         if not wave_regions:
             messagebox.showwarning("Warning", "No wave regions defined.", parent=self)
@@ -2365,7 +2336,7 @@ class ConfigToolWindow(tk.Toplevel):
 
     def _redraw_regions_on_canvas(self):
         self.canvas.delete("region")
-        colors = {"wave": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
+        colors = {"frf": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
                   "run": "#f1c40f", "hammer": "#f39c12", "response": "#e67e22"}
         if not hasattr(self, 'x_offset'):
             return 
@@ -2478,7 +2449,7 @@ class GraphViewerFrame(ttk.LabelFrame):
     MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
     
     def __init__(self, parent):
-        super().__init__(parent, text="Graph Viewer & Console")
+        super().__init__(parent, text="Live Graph & Console")
         self.current_plot_index = 0
         self.current_hit_index = -1
         self.hit_history: List[LightweightHitData] = []
@@ -2523,15 +2494,15 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
         
-        # Notebook with Graph and Console tabs
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Horizontal PanedWindow for split view (Graph | Console)
+        self.paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Graph tab
-        graph_frame = ttk.Frame(self.notebook)
-        self.notebook.add(graph_frame, text="Graph")
+        # Left side: Graph
+        graph_frame = ttk.LabelFrame(self.paned, text="Live Graph")
+        self.paned.add(graph_frame, weight=3)
         
-        self.figure = Figure(figsize=(8, 3), dpi=100, facecolor='#1E1E1E')
+        self.figure = Figure(figsize=(6, 3), dpi=100, facecolor='#1E1E1E')
         self.ax = self.figure.add_subplot(111)
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='both', colors='white')
@@ -2541,15 +2512,18 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
-        # Console tab
-        console_frame = ttk.Frame(self.notebook)
-        self.notebook.add(console_frame, text="Console")
+        # Right side: Console
+        console_frame = ttk.LabelFrame(self.paned, text="Console Output")
+        self.paned.add(console_frame, weight=2)
         
         # Console text widget with scrollbar
-        console_scroll = ttk.Scrollbar(console_frame, orient=tk.VERTICAL)
+        console_inner = ttk.Frame(console_frame)
+        console_inner.pack(fill=tk.BOTH, expand=True)
+        
+        console_scroll = ttk.Scrollbar(console_inner, orient=tk.VERTICAL)
         console_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.console_text = tk.Text(console_frame, wrap=tk.WORD, bg='#1E1E1E', fg='#00FF00',
+        self.console_text = tk.Text(console_inner, wrap=tk.WORD, bg='#1E1E1E', fg='#00FF00',
                                     font=('Consolas', 9), state='disabled',
                                     yscrollcommand=console_scroll.set)
         self.console_text.pack(fill=tk.BOTH, expand=True)
@@ -2822,6 +2796,15 @@ class MonitorControlGUI:
         self.is_monitoring = tk.BooleanVar(value=False)
         self.is_overlay_on = tk.BooleanVar(value=False)
         self.verbose_logging_on = tk.BooleanVar(value=True)
+        
+        # Verbose log option variables
+        self.vlog_opt_config = tk.BooleanVar(value=True)
+        self.vlog_opt_mask = tk.BooleanVar(value=True)
+        self.vlog_opt_ocr = tk.BooleanVar(value=True)
+        self.vlog_opt_fft = tk.BooleanVar(value=True)
+        self.vlog_opt_lowpass = tk.BooleanVar(value=True)
+        self.vlog_opt_classification = tk.BooleanVar(value=True)
+        self.vlog_opt_filesave = tk.BooleanVar(value=True)
         self.image_logging_on = tk.BooleanVar(value=False)
         self.log_opt_screenshot = tk.BooleanVar(value=False)
         self.log_opt_color_filter = tk.BooleanVar(value=False)
@@ -2834,7 +2817,6 @@ class MonitorControlGUI:
         self.log_events_only = tk.BooleanVar(value=True)  # When False, logs every ~1 second
         
         self.audio_feedback_on = tk.BooleanVar(value=False)
-        self.log_to_mat = tk.BooleanVar(value=False)
         self.log_to_unv = tk.BooleanVar(value=False)
         
         self.monitor = ScreenMonitor(self.config_path.get(), self.update_feedback_panel, self._on_plot_data)
@@ -2978,8 +2960,26 @@ class MonitorControlGUI:
         logging_main_frame = ttk.Frame(logging_controls_frame)
         logging_main_frame.pack(fill=tk.X, side=tk.LEFT, anchor=tk.N, padx=5)
         
-        self.verbose_check = ttk.Checkbutton(logging_main_frame, text="Verbose Console Log", variable=self.verbose_logging_on)
+        self.verbose_check = ttk.Checkbutton(logging_main_frame, text="Verbose Console Log", variable=self.verbose_logging_on, command=self._toggle_verbose_log_options_state)
         self.verbose_check.pack(anchor=tk.W, pady=2)
+        
+        # Verbose log options frame
+        self.verbose_log_options_frame = ttk.Frame(logging_main_frame)
+        self.verbose_log_options_frame.pack(fill=tk.X, pady=(2,5))
+        
+        vcol1 = ttk.Frame(self.verbose_log_options_frame)
+        vcol1.pack(side=tk.LEFT, anchor=tk.N)
+        vcol2 = ttk.Frame(self.verbose_log_options_frame)
+        vcol2.pack(side=tk.LEFT, anchor=tk.N, padx=5)
+        
+        ttk.Checkbutton(vcol1, text="Config Values", variable=self.vlog_opt_config).pack(anchor=tk.W)
+        ttk.Checkbutton(vcol1, text="Mask Debug", variable=self.vlog_opt_mask).pack(anchor=tk.W)
+        ttk.Checkbutton(vcol1, text="OCR Output", variable=self.vlog_opt_ocr).pack(anchor=tk.W)
+        ttk.Checkbutton(vcol1, text="Classification", variable=self.vlog_opt_classification).pack(anchor=tk.W)
+        
+        ttk.Checkbutton(vcol2, text="FFT Data", variable=self.vlog_opt_fft).pack(anchor=tk.W)
+        ttk.Checkbutton(vcol2, text="Lowpass Data", variable=self.vlog_opt_lowpass).pack(anchor=tk.W)
+        ttk.Checkbutton(vcol2, text="File Saves", variable=self.vlog_opt_filesave).pack(anchor=tk.W)
         
         self.img_log_check = ttk.Checkbutton(logging_main_frame, text="Enable Image Logs", variable=self.image_logging_on, command=self._toggle_img_log_options_state)
         self.img_log_check.pack(anchor=tk.W, pady=2)
@@ -3007,7 +3007,6 @@ class MonitorControlGUI:
         
         data_logging_frame = ttk.Frame(logging_controls_frame)
         data_logging_frame.pack(fill=tk.X, side=tk.LEFT, padx=10, anchor=tk.N)
-        ttk.Checkbutton(data_logging_frame, text="Log to .mat", variable=self.log_to_mat).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(data_logging_frame, text="Log to .unv", variable=self.log_to_unv).pack(anchor=tk.W, pady=2)
 
         # Analysis Parameters Frame (Live Tuning)
@@ -3078,6 +3077,7 @@ class MonitorControlGUI:
         self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
         self._toggle_img_log_options_state()
+        self._toggle_verbose_log_options_state()
         self._update_manual_points_state()
     
     def _on_mousewheel(self, event):
@@ -3106,6 +3106,13 @@ class MonitorControlGUI:
     def _toggle_img_log_options_state(self):
         state = tk.NORMAL if self.image_logging_on.get() else tk.DISABLED
         for col in self.img_log_options_frame.winfo_children():
+            for child in col.winfo_children():
+                child.configure(state=state)
+
+    def _toggle_verbose_log_options_state(self):
+        """Enable/disable verbose log checkboxes based on master toggle."""
+        state = tk.NORMAL if self.verbose_logging_on.get() else tk.DISABLED
+        for col in self.verbose_log_options_frame.winfo_children():
             for child in col.winfo_children():
                 child.configure(state=state)
 
@@ -3267,11 +3274,17 @@ class MonitorControlGUI:
                 self.log_opt_summary_chart.get(),
                 self.log_opt_ocr_images.get()
             )
-            data_log_opts = DataLogOptions(self.log_to_mat.get(), self.log_to_unv.get())
+            data_log_opts = DataLogOptions(self.log_to_unv.get())
+            verbose_log_opts = VerboseLogOptions(
+                self.vlog_opt_config.get(), self.vlog_opt_mask.get(),
+                self.vlog_opt_ocr.get(), self.vlog_opt_fft.get(),
+                self.vlog_opt_lowpass.get(), self.vlog_opt_classification.get(),
+                self.vlog_opt_filesave.get()
+            )
             manual_points = PointsInfo(**{k: v.get() for k, v in self.manual_points_vars.items()})
             
             if self.monitor.start(self.verbose_logging_on.get(), self.image_logging_on.get(), 
-                                  img_log_opts, data_log_opts, manual_points):
+                                  img_log_opts, data_log_opts, verbose_log_opts, manual_points):
                 self.is_monitoring.set(True)
                 self.start_stop_button.config(text="Stop Monitoring")
                 self.status_label.config(text="Monitoring active...")
