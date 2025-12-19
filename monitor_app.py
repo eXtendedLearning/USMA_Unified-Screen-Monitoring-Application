@@ -3192,7 +3192,7 @@ class MonitorControlGUI:
         res_thr_spin.bind('<Return>', lambda e: self._apply_params_live())
 
         ttk.Label(res_frame, text="Exc.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.5, increment=0.01,
+        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.99, increment=0.01,
                                      textvariable=self.param_vars['exceedance_ratio_threshold'],
                                      width=7, command=self._apply_params_live)
         exc_ratio_spin.pack(side=tk.LEFT, padx=2)
