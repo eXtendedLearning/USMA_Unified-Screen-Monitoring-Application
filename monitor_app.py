@@ -291,12 +291,12 @@ class AppConfig:
     hsv_lower: List[int] = field(default_factory=lambda: [0, 0, 0])
     hsv_upper: List[int] = field(default_factory=lambda: [179, 255, 240])
     screenshot_interval: float = 0.25
-    fft_cutoff_frequency: float = 0.09
-    fft_energy_ratio_threshold: float = 0.013
-    lowpass_cutoff: float = 0.05
-    lowpass_filter_order: int = 4
+    fft_cutoff_frequency: float = 0.07
+    fft_energy_ratio_threshold: float = 0.006
+    lowpass_cutoff: float = 0.07
+    lowpass_filter_order: int = 7
     residual_threshold: float = 0.005
-    exceedance_ratio_threshold: float = 0.05
+    exceedance_ratio_threshold: float = 0.7
 
 
 @contextmanager
@@ -2282,7 +2282,7 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Spinbox(lp_row2, from_=0.0001, to=0.1, increment=0.0005, 
                    textvariable=self.param_vars['residual_threshold'], width=8, format="%.4f").pack(side=tk.LEFT, padx=2)
         ttk.Label(lp_row2, text="Exc.Ratio:").pack(side=tk.LEFT)
-        ttk.Spinbox(lp_row2, from_=0.01, to=0.5, increment=0.01, 
+        ttk.Spinbox(lp_row2, from_=0.01, to=0.99, increment=0.01, 
                    textvariable=self.param_vars['exceedance_ratio_threshold'], width=6).pack(side=tk.LEFT, padx=2)
         
         ttk.Button(params_frame, text="Apply Parameters", command=self._apply_params).pack(fill=tk.X, pady=5, padx=5)
