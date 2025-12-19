@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) - v0.5.1 (FRF ROI Release)
+# USMA (Unified Screen Monitoring Application) - v0.5.2 (UI Polish Release)
 
 A professional-grade GUI application for real-time screen monitoring, signal analysis, and Optical Character Recognition (OCR) designed for modal analysis workflows. USMA captures screen regions, reconstructs FRF signals, performs dual-method quality classification, and exports data in industry-standard UNV Dataset 58 format.
 
@@ -7,7 +7,7 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 ## Key Features
 
 - **Startup Calibration Wizard** - Config selection or new calibration prompt at launch
-- **HSV Color Filter Calibration** - Live preview window for tuning color detection
+- **HSV Color Filter Calibration** - Live preview window with sliders, text entry, and zoom
 - **Real-time Screen Monitoring** - Fast capture using native OS APIs (mss library)
 - **Dual Classification System** - FFT energy ratio + Lowpass residual analysis
 - **Split-View Interface** - Live graph and console output displayed side-by-side
@@ -20,7 +20,18 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 
 ## Version History
 
-### v0.5.1 (Current Release - FRF ROI Release)
+### v0.5.2 (Current Release - UI Polish Release)
+
+* **Mask Logging Bug Fix** - Mask debug logging now respects the checkbox state (only logs when enabled)
+* **Logging Options Layout** - Reorganized from vertical (4x2) to horizontal (2x4) layout for better space usage
+* **Selective Manual Points** - Run/Hammer/Response fields now individually enabled when their OCR region is missing
+* **HSV Calibration Enhancements**:
+  - Added text entry fields for precise HSV min/max value input
+  - Preview images now stacked vertically (Original → Mask → Filtered)
+  - Added zoom controls (+/- buttons and mouse wheel) for detailed inspection
+  - Sliders and text entries stay synchronized
+
+### v0.5.1 (FRF ROI Release)
 
 * **FRF ROI Renamed** - "Wave" ROI type renamed to "FRF" for clarity (future versions will include other reconstructed signal types)
 * **Removed .mat Export** - MATLAB .mat export removed; UNV Dataset 58 is now the sole export format
@@ -163,17 +174,26 @@ USMA uses a dual-method classification approach for robust hit quality assessmen
 
 ### HSV Color Filter Calibration
 
-The HSV calibration window (accessible via "Calibrate Color Filter" in Config Tool) allows you to:
-- See live preview of Original | Mask | Filtered views
-- Adjust Hue, Saturation, and Value ranges with sliders
-- Immediately see which pixels will be detected as the signal line
-- Apply changes to save to your configuration
+The HSV calibration window (accessible via "Calibrate Color Filter" in Config Tool) provides:
+- **Live preview** of Original, Mask, and Filtered views (stacked vertically)
+- **Dual input methods** - Sliders for quick adjustment, text entry for precise values
+- **Zoom controls** - Use +/- buttons or mouse wheel to inspect details
+- **Real-time updates** - See mask changes immediately as you adjust values
 
 **Tip:** For best results, the mask should show only the signal line as white pixels, with everything else black.
 
+### Manual Points Entry
+
+When OCR regions are not defined in your configuration, you can manually enter values:
+- **Run Number** - Current test run (enabled when Run OCR region is missing)
+- **Hammer Point/Direction** - Impact location and direction (enabled when Hammer OCR region is missing)
+- **Response Point/Direction** - Measurement location and direction (enabled when Response OCR region is missing)
+
+Each field is independently enabled based on which OCR regions are configured.
+
 ### Verbose Logging Options
 
-Enable/disable specific logging categories:
+Enable/disable specific logging categories (horizontal layout for compact display):
 - **Config Values** - HSV filter parameters logged periodically
 - **Mask Debug** - Pixel statistics for color mask analysis
 - **OCR Output** - Recognition results from text regions
@@ -246,7 +266,7 @@ Check `run_log.txt` for detailed error messages.
 
 | Component | Version |
 |-----------|---------|
-| USMA | 0.5.1 |
+| USMA | 0.5.2 |
 | Python | 3.11.9 (Portable) |
 | Tesseract | 5.x (Portable) |
 | Package Size | ~350 MB |

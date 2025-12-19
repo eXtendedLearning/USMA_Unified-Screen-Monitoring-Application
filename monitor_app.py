@@ -17,7 +17,7 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v0.5.1 (FRF ROI Release)
+USMA (Unified Screen Monitoring Application) - v0.5.2 (UI Enhancement Release)
 
 A professional-grade GUI application for real-time screen monitoring, signal
 analysis, and OCR designed for modal analysis workflows. Captures screen regions,
@@ -1113,8 +1113,8 @@ class ScreenMonitor:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(self.app_config.hsv_lower), np.array(self.app_config.hsv_upper))
         
-        # Debug: Log mask statistics (only when verbose logging enabled)
-        if self.verbose_logging_enabled and self.frame_count % 20 == 0:
+        # Debug: Log mask statistics (only when verbose logging AND mask debug enabled)
+        if self.verbose_logging_enabled and self.verbose_log_options.log_mask_debug and self.frame_count % 20 == 0:
             total_px = mask.shape[0] * mask.shape[1]
             white_px = np.count_nonzero(mask)
             logger.info(f"[MASK DEBUG] White pixels: {white_px}/{total_px} ({100*white_px/total_px:.2f}%)")
@@ -1699,6 +1699,12 @@ class StartupDialog(tk.Toplevel):
 class HSVCalibrationWindow(tk.Toplevel):
     """
     HSV color filter calibration with live preview.
+    
+    Features:
+    - Vertical stacking of preview images (Original, Mask, Filtered)
+    - Sliders AND manual text entry for HSV min/max values
+    - Mouse wheel zoom on preview canvas
+    - Zoom slider for precise control
 
     Args:
         parent: Parent window
@@ -1722,8 +1728,14 @@ class HSVCalibrationWindow(tk.Toplevel):
 
         # Selected region for preview
         self.selected_region_name = list(wave_regions.keys())[0] if wave_regions else None
+        
+        # Zoom level (1.0 = fit to canvas, >1.0 = zoomed in)
+        self.zoom_level = tk.DoubleVar(value=1.0)
+        self.pan_x = 0  # Pan offset for zoomed view
+        self.pan_y = 0
+        self._drag_start = None
 
-        self.geometry("900x700")
+        self.geometry("700x900")  # Taller for vertical layout
         self._setup_ui()
 
         self.transient(parent)
@@ -1744,14 +1756,32 @@ class HSVCalibrationWindow(tk.Toplevel):
             region_combo.pack(side=tk.LEFT, padx=5)
             region_combo.bind("<<ComboboxSelected>>", self._on_region_changed)
 
-        # Preview canvas
-        preview_frame = ttk.LabelFrame(self, text="Preview: Original | Mask | Filtered")
+        # Preview frame with vertical stacking
+        preview_frame = ttk.LabelFrame(self, text="Preview (Vertical: Original → Mask → Filtered)")
         preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Zoom controls
+        zoom_frame = ttk.Frame(preview_frame)
+        zoom_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(zoom_frame, text="Zoom:").pack(side=tk.LEFT)
+        zoom_slider = ttk.Scale(zoom_frame, from_=0.5, to=4.0, variable=self.zoom_level,
+                                orient=tk.HORIZONTAL, length=150, command=lambda _: self._update_preview())
+        zoom_slider.pack(side=tk.LEFT, padx=5)
+        self.zoom_label = ttk.Label(zoom_frame, text="100%")
+        self.zoom_label.pack(side=tk.LEFT)
+        ttk.Button(zoom_frame, text="Fit", width=4, command=self._reset_zoom).pack(side=tk.LEFT, padx=5)
+        ttk.Label(zoom_frame, text="(Mouse wheel to zoom, drag to pan)", font=("Segoe UI", 8)).pack(side=tk.RIGHT)
 
         self.preview_canvas = tk.Canvas(preview_frame, bg='black')
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Bind mouse events for zoom and pan
+        self.preview_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.preview_canvas.bind("<Button-1>", self._on_drag_start)
+        self.preview_canvas.bind("<B1-Motion>", self._on_drag_motion)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_drag_end)
 
-        # Sliders frame
+        # Sliders frame with manual entry
         sliders_frame = ttk.LabelFrame(self, text="HSV Ranges (Hue: 0-179, Saturation/Value: 0-255)")
         sliders_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -1763,7 +1793,7 @@ class HSVCalibrationWindow(tk.Toplevel):
         self.v_min_var = tk.IntVar(value=self.hsv_lower[2])
         self.v_max_var = tk.IntVar(value=self.hsv_upper[2])
 
-        # Layout sliders in grid
+        # Layout sliders with entry boxes in grid
         self._create_slider_row(sliders_frame, 0, "Hue", self.h_min_var, self.h_max_var, 0, 179)
         self._create_slider_row(sliders_frame, 1, "Saturation", self.s_min_var, self.s_max_var, 0, 255)
         self._create_slider_row(sliders_frame, 2, "Value", self.v_min_var, self.v_max_var, 0, 255)
@@ -1777,29 +1807,90 @@ class HSVCalibrationWindow(tk.Toplevel):
         ttk.Button(button_frame, text="Apply", command=self._on_apply).pack(side=tk.RIGHT, padx=5)
 
     def _create_slider_row(self, parent, row, label, min_var, max_var, range_min, range_max):
-        """Create a row with label, min slider, max slider."""
+        """Create a row with label, min slider + entry, max slider + entry."""
         ttk.Label(parent, text=f"{label}:", width=10).grid(row=row, column=0, padx=5, pady=5, sticky=tk.W)
 
+        # Min controls
         ttk.Label(parent, text="Min:").grid(row=row, column=1, padx=2)
         min_slider = ttk.Scale(parent, from_=range_min, to=range_max, variable=min_var,
-                               orient=tk.HORIZONTAL, length=250, command=lambda _: self._on_slider_changed())
+                               orient=tk.HORIZONTAL, length=150, command=lambda _: self._on_slider_changed())
         min_slider.grid(row=row, column=2, padx=2)
-        ttk.Label(parent, textvariable=min_var, width=4).grid(row=row, column=3, padx=2)
+        
+        # Min entry box
+        min_entry = ttk.Entry(parent, textvariable=min_var, width=5)
+        min_entry.grid(row=row, column=3, padx=2)
+        min_entry.bind('<Return>', lambda e: self._on_entry_changed(min_var, range_min, range_max))
+        min_entry.bind('<FocusOut>', lambda e: self._on_entry_changed(min_var, range_min, range_max))
 
-        ttk.Label(parent, text="Max:").grid(row=row, column=4, padx=(15, 2))
+        # Max controls
+        ttk.Label(parent, text="Max:").grid(row=row, column=4, padx=(10, 2))
         max_slider = ttk.Scale(parent, from_=range_min, to=range_max, variable=max_var,
-                               orient=tk.HORIZONTAL, length=250, command=lambda _: self._on_slider_changed())
+                               orient=tk.HORIZONTAL, length=150, command=lambda _: self._on_slider_changed())
         max_slider.grid(row=row, column=5, padx=2)
-        ttk.Label(parent, textvariable=max_var, width=4).grid(row=row, column=6, padx=2)
+        
+        # Max entry box
+        max_entry = ttk.Entry(parent, textvariable=max_var, width=5)
+        max_entry.grid(row=row, column=6, padx=2)
+        max_entry.bind('<Return>', lambda e: self._on_entry_changed(max_var, range_min, range_max))
+        max_entry.bind('<FocusOut>', lambda e: self._on_entry_changed(max_var, range_min, range_max))
+    
+    def _on_entry_changed(self, var, range_min, range_max):
+        """Validate and apply manual entry value."""
+        try:
+            val = int(var.get())
+            val = max(range_min, min(range_max, val))  # Clamp to valid range
+            var.set(val)
+        except (ValueError, tk.TclError):
+            pass  # Invalid input, keep current value
+        self._on_slider_changed()
 
     def _on_slider_changed(self):
         """Update preview when any slider changes."""
         self.hsv_lower = [self.h_min_var.get(), self.s_min_var.get(), self.v_min_var.get()]
         self.hsv_upper = [self.h_max_var.get(), self.s_max_var.get(), self.v_max_var.get()]
         self._update_preview()
+    
+    def _reset_zoom(self):
+        """Reset zoom to fit."""
+        self.zoom_level.set(1.0)
+        self.pan_x = 0
+        self.pan_y = 0
+        self._update_preview()
+    
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel for zooming."""
+        # Get current zoom
+        current = self.zoom_level.get()
+        
+        # Zoom in/out by 10%
+        if event.delta > 0:
+            new_zoom = min(4.0, current * 1.1)
+        else:
+            new_zoom = max(0.5, current / 1.1)
+        
+        self.zoom_level.set(new_zoom)
+        self._update_preview()
+    
+    def _on_drag_start(self, event):
+        """Start pan drag."""
+        self._drag_start = (event.x, event.y)
+    
+    def _on_drag_motion(self, event):
+        """Handle pan drag motion."""
+        if self._drag_start and self.zoom_level.get() > 1.0:
+            dx = event.x - self._drag_start[0]
+            dy = event.y - self._drag_start[1]
+            self.pan_x += dx
+            self.pan_y += dy
+            self._drag_start = (event.x, event.y)
+            self._update_preview()
+    
+    def _on_drag_end(self, event):
+        """End pan drag."""
+        self._drag_start = None
 
     def _update_preview(self):
-        """Update the preview canvas with current HSV filter applied."""
+        """Update the preview canvas with current HSV filter applied (vertical stack)."""
         if not self.selected_region_name or self.screenshot is None:
             return
 
@@ -1813,44 +1904,65 @@ class HSVCalibrationWindow(tk.Toplevel):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(self.hsv_lower), np.array(self.hsv_upper))
 
-        # Create visualization: Original | Mask | Filtered
+        # Create visualization images
         roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
         mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
         filtered = cv2.bitwise_and(roi_rgb, roi_rgb, mask=mask)
+        
+        # Add labels to each image
+        label_height = 25
+        img_h, img_w = roi_rgb.shape[:2]
+        
+        def add_label(img, text):
+            """Add a label bar above the image."""
+            label_bar = np.zeros((label_height, img_w, 3), dtype=np.uint8)
+            label_bar[:] = (40, 40, 40)  # Dark gray background
+            cv2.putText(label_bar, text, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            return np.vstack([label_bar, img])
+        
+        roi_labeled = add_label(roi_rgb, "Original")
+        mask_labeled = add_label(mask_rgb, "Mask")
+        filtered_labeled = add_label(filtered, "Filtered")
 
-        # Combine horizontally
-        combined = np.hstack([roi_rgb, mask_rgb, filtered])
+        # Combine vertically
+        combined = np.vstack([roi_labeled, mask_labeled, filtered_labeled])
 
-        # Resize to fit canvas
+        # Get canvas dimensions
         canvas_w = self.preview_canvas.winfo_width()
         canvas_h = self.preview_canvas.winfo_height()
         if canvas_w < 10 or canvas_h < 10:
-            canvas_w, canvas_h = 860, 400
+            canvas_w, canvas_h = 660, 500
 
         img_h, img_w = combined.shape[:2]
-        scale = min(canvas_w / img_w, canvas_h / img_h, 1.0)
+        
+        # Calculate base scale to fit canvas
+        base_scale = min(canvas_w / img_w, canvas_h / img_h, 1.0)
+        
+        # Apply zoom
+        zoom = self.zoom_level.get()
+        scale = base_scale * zoom
+        
+        # Update zoom label
+        self.zoom_label.config(text=f"{int(zoom * 100)}%")
+        
         new_w, new_h = int(img_w * scale), int(img_h * scale)
 
         if new_w > 0 and new_h > 0:
-            resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_LINEAR if zoom > 1 else cv2.INTER_AREA)
             self.preview_photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
 
             self.preview_canvas.delete("all")
-            x_offset = (canvas_w - new_w) // 2
-            y_offset = (canvas_h - new_h) // 2
+            
+            # Calculate position with pan offset
+            x_offset = (canvas_w - new_w) // 2 + self.pan_x
+            y_offset = (canvas_h - new_h) // 2 + self.pan_y
+            
             self.preview_canvas.create_image(x_offset, y_offset, image=self.preview_photo, anchor=tk.NW)
-
-            # Add labels
-            section_w = new_w // 3
-            self.preview_canvas.create_text(x_offset + section_w//2, y_offset + new_h + 10,
-                                           text="Original", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
-            self.preview_canvas.create_text(x_offset + section_w + section_w//2, y_offset + new_h + 10,
-                                           text="Mask", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
-            self.preview_canvas.create_text(x_offset + 2*section_w + section_w//2, y_offset + new_h + 10,
-                                           text="Filtered", fill="white", anchor=tk.N, font=("Segoe UI", 10, "bold"))
 
     def _on_region_changed(self, event=None):
         self.selected_region_name = self.region_var.get()
+        self.pan_x = 0
+        self.pan_y = 0
         self._update_preview()
 
     def _on_apply(self):
@@ -2795,16 +2907,16 @@ class MonitorControlGUI:
         self.config_path = tk.StringVar(value=default_config)
         self.is_monitoring = tk.BooleanVar(value=False)
         self.is_overlay_on = tk.BooleanVar(value=False)
-        self.verbose_logging_on = tk.BooleanVar(value=True)
+        self.verbose_logging_on = tk.BooleanVar(value=False)
         
-        # Verbose log option variables
-        self.vlog_opt_config = tk.BooleanVar(value=True)
-        self.vlog_opt_mask = tk.BooleanVar(value=True)
-        self.vlog_opt_ocr = tk.BooleanVar(value=True)
-        self.vlog_opt_fft = tk.BooleanVar(value=True)
-        self.vlog_opt_lowpass = tk.BooleanVar(value=True)
-        self.vlog_opt_classification = tk.BooleanVar(value=True)
-        self.vlog_opt_filesave = tk.BooleanVar(value=True)
+        # Verbose log option variables (all default to False like image logging)
+        self.vlog_opt_config = tk.BooleanVar(value=False)
+        self.vlog_opt_mask = tk.BooleanVar(value=False)
+        self.vlog_opt_ocr = tk.BooleanVar(value=False)
+        self.vlog_opt_fft = tk.BooleanVar(value=False)
+        self.vlog_opt_lowpass = tk.BooleanVar(value=False)
+        self.vlog_opt_classification = tk.BooleanVar(value=False)
+        self.vlog_opt_filesave = tk.BooleanVar(value=False)
         self.image_logging_on = tk.BooleanVar(value=False)
         self.log_opt_screenshot = tk.BooleanVar(value=False)
         self.log_opt_color_filter = tk.BooleanVar(value=False)
@@ -2945,14 +3057,26 @@ class MonitorControlGUI:
         self.manual_points_frame = ttk.LabelFrame(right_panel, text="Manual Points of Interest (POI) Entry")
         self.manual_points_frame.pack(fill=tk.X)
         pf = self.manual_points_frame
-        ttk.Label(pf, text="Run:").grid(row=0, column=0, padx=5, pady=2)
-        ttk.Entry(pf, textvariable=self.manual_points_vars['run'], width=8).grid(row=0, column=1)
-        ttk.Label(pf, text="Hammer:").grid(row=0, column=2, padx=5)
-        ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_point'], width=6).grid(row=0, column=3)
-        ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_dir'], width=4).grid(row=0, column=4)
-        ttk.Label(pf, text="Response:").grid(row=1, column=2, padx=5)
-        ttk.Entry(pf, textvariable=self.manual_points_vars['response_point'], width=6).grid(row=1, column=3)
-        ttk.Entry(pf, textvariable=self.manual_points_vars['response_dir'], width=4).grid(row=1, column=4)
+        
+        # Store widget references for selective enabling/disabling
+        self.manual_run_label = ttk.Label(pf, text="Run:")
+        self.manual_run_label.grid(row=0, column=0, padx=5, pady=2)
+        self.manual_run_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['run'], width=8)
+        self.manual_run_entry.grid(row=0, column=1)
+        
+        self.manual_hammer_label = ttk.Label(pf, text="Hammer:")
+        self.manual_hammer_label.grid(row=0, column=2, padx=5)
+        self.manual_hammer_point_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_point'], width=6)
+        self.manual_hammer_point_entry.grid(row=0, column=3)
+        self.manual_hammer_dir_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_dir'], width=4)
+        self.manual_hammer_dir_entry.grid(row=0, column=4)
+        
+        self.manual_response_label = ttk.Label(pf, text="Response:")
+        self.manual_response_label.grid(row=1, column=2, padx=5)
+        self.manual_response_point_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['response_point'], width=6)
+        self.manual_response_point_entry.grid(row=1, column=3)
+        self.manual_response_dir_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['response_dir'], width=4)
+        self.manual_response_dir_entry.grid(row=1, column=4)
         
         logging_controls_frame = ttk.LabelFrame(right_panel, text="Logging")
         logging_controls_frame.pack(fill=tk.X, pady=5)
@@ -2963,47 +3087,47 @@ class MonitorControlGUI:
         self.verbose_check = ttk.Checkbutton(logging_main_frame, text="Verbose Console Log", variable=self.verbose_logging_on, command=self._toggle_verbose_log_options_state)
         self.verbose_check.pack(anchor=tk.W, pady=2)
         
-        # Verbose log options frame
+        # Verbose log options frame - horizontal 2x4 grid layout
         self.verbose_log_options_frame = ttk.Frame(logging_main_frame)
         self.verbose_log_options_frame.pack(fill=tk.X, pady=(2,5))
         
-        vcol1 = ttk.Frame(self.verbose_log_options_frame)
-        vcol1.pack(side=tk.LEFT, anchor=tk.N)
-        vcol2 = ttk.Frame(self.verbose_log_options_frame)
-        vcol2.pack(side=tk.LEFT, anchor=tk.N, padx=5)
+        # Row 1: Config, Mask, OCR, Classification
+        vrow1 = ttk.Frame(self.verbose_log_options_frame)
+        vrow1.pack(fill=tk.X, anchor=tk.W)
+        ttk.Checkbutton(vrow1, text="Config", variable=self.vlog_opt_config).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vrow1, text="Mask", variable=self.vlog_opt_mask).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vrow1, text="OCR", variable=self.vlog_opt_ocr).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vrow1, text="Classify", variable=self.vlog_opt_classification).pack(side=tk.LEFT, padx=2)
         
-        ttk.Checkbutton(vcol1, text="Config Values", variable=self.vlog_opt_config).pack(anchor=tk.W)
-        ttk.Checkbutton(vcol1, text="Mask Debug", variable=self.vlog_opt_mask).pack(anchor=tk.W)
-        ttk.Checkbutton(vcol1, text="OCR Output", variable=self.vlog_opt_ocr).pack(anchor=tk.W)
-        ttk.Checkbutton(vcol1, text="Classification", variable=self.vlog_opt_classification).pack(anchor=tk.W)
-        
-        ttk.Checkbutton(vcol2, text="FFT Data", variable=self.vlog_opt_fft).pack(anchor=tk.W)
-        ttk.Checkbutton(vcol2, text="Lowpass Data", variable=self.vlog_opt_lowpass).pack(anchor=tk.W)
-        ttk.Checkbutton(vcol2, text="File Saves", variable=self.vlog_opt_filesave).pack(anchor=tk.W)
+        # Row 2: FFT, Lowpass, File Saves
+        vrow2 = ttk.Frame(self.verbose_log_options_frame)
+        vrow2.pack(fill=tk.X, anchor=tk.W)
+        ttk.Checkbutton(vrow2, text="FFT", variable=self.vlog_opt_fft).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vrow2, text="Lowpass", variable=self.vlog_opt_lowpass).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vrow2, text="FileSave", variable=self.vlog_opt_filesave).pack(side=tk.LEFT, padx=2)
         
         self.img_log_check = ttk.Checkbutton(logging_main_frame, text="Enable Image Logs", variable=self.image_logging_on, command=self._toggle_img_log_options_state)
         self.img_log_check.pack(anchor=tk.W, pady=2)
         
+        # Image log options frame - horizontal 2x4 grid layout
         self.img_log_options_frame = ttk.Frame(logging_main_frame)
         self.img_log_options_frame.pack(fill=tk.X, pady=(5,0))
         
-        col1 = ttk.Frame(self.img_log_options_frame)
-        col1.pack(side=tk.LEFT, anchor=tk.N)
-        col2 = ttk.Frame(self.img_log_options_frame)
-        col2.pack(side=tk.LEFT, anchor=tk.N, padx=5)
-        col3 = ttk.Frame(self.img_log_options_frame)
-        col3.pack(side=tk.LEFT, anchor=tk.N)
+        # Row 1: ROI, Masks, OCR, Signal
+        irow1 = ttk.Frame(self.img_log_options_frame)
+        irow1.pack(fill=tk.X, anchor=tk.W)
+        ttk.Checkbutton(irow1, text="ROI", variable=self.log_opt_screenshot).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow1, text="Masks", variable=self.log_opt_color_filter).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow1, text="OCR", variable=self.log_opt_ocr_images).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow1, text="Signal", variable=self.log_opt_signal_plot).pack(side=tk.LEFT, padx=2)
         
-        ttk.Checkbutton(col1, text="ROI Screenshots", variable=self.log_opt_screenshot).pack(anchor=tk.W)
-        ttk.Checkbutton(col1, text="Color Masks", variable=self.log_opt_color_filter).pack(anchor=tk.W)
-        ttk.Checkbutton(col1, text="OCR Images", variable=self.log_opt_ocr_images).pack(anchor=tk.W)
-        
-        ttk.Checkbutton(col2, text="Signal Plot", variable=self.log_opt_signal_plot).pack(anchor=tk.W)
-        ttk.Checkbutton(col2, text="FFT Plot", variable=self.log_opt_fft_plot).pack(anchor=tk.W)
-        ttk.Checkbutton(col2, text="Summary Chart", variable=self.log_opt_summary_chart).pack(anchor=tk.W)
-        
-        ttk.Checkbutton(col3, text="Lowpass Plot", variable=self.log_opt_lowpass_plot).pack(anchor=tk.W)
-        ttk.Checkbutton(col3, text="Residual Plot", variable=self.log_opt_residual_plot).pack(anchor=tk.W)
+        # Row 2: FFT, Lowpass, Residual, Summary
+        irow2 = ttk.Frame(self.img_log_options_frame)
+        irow2.pack(fill=tk.X, anchor=tk.W)
+        ttk.Checkbutton(irow2, text="FFT", variable=self.log_opt_fft_plot).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow2, text="Lowpass", variable=self.log_opt_lowpass_plot).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow2, text="Residual", variable=self.log_opt_residual_plot).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(irow2, text="Summary", variable=self.log_opt_summary_chart).pack(side=tk.LEFT, padx=2)
         
         data_logging_frame = ttk.Frame(logging_controls_frame)
         data_logging_frame.pack(fill=tk.X, side=tk.LEFT, padx=10, anchor=tk.N)
@@ -3184,12 +3308,37 @@ class MonitorControlGUI:
         self.graph_viewer.clear()
     
     def _update_manual_points_state(self):
-        has_points_region = any(r.roi_type in ['run', 'hammer', 'response'] 
-                                for r in self.monitor.app_config.regions.values() if r.enabled)
-        state = tk.DISABLED if has_points_region else tk.NORMAL
-        for child in self.manual_points_frame.winfo_children():
-            if isinstance(child, (ttk.Entry, ttk.Label)):
-                child.configure(state=state)
+        """Selectively enable/disable manual entry fields based on which OCR ROIs exist.
+        
+        If a specific ROI type is defined and enabled, disable its corresponding entry.
+        If missing, allow manual entry for that field.
+        """
+        # Check which ROI types are defined
+        has_run_roi = any(r.roi_type == 'run' and r.enabled 
+                          for r in self.monitor.app_config.regions.values())
+        has_hammer_roi = any(r.roi_type == 'hammer' and r.enabled 
+                             for r in self.monitor.app_config.regions.values())
+        has_response_roi = any(r.roi_type == 'response' and r.enabled 
+                               for r in self.monitor.app_config.regions.values())
+        
+        # Set states for each group of widgets
+        run_state = tk.DISABLED if has_run_roi else tk.NORMAL
+        hammer_state = tk.DISABLED if has_hammer_roi else tk.NORMAL
+        response_state = tk.DISABLED if has_response_roi else tk.NORMAL
+        
+        # Apply states to Run widgets
+        self.manual_run_label.configure(state=run_state)
+        self.manual_run_entry.configure(state=run_state)
+        
+        # Apply states to Hammer widgets
+        self.manual_hammer_label.configure(state=hammer_state)
+        self.manual_hammer_point_entry.configure(state=hammer_state)
+        self.manual_hammer_dir_entry.configure(state=hammer_state)
+        
+        # Apply states to Response widgets
+        self.manual_response_label.configure(state=response_state)
+        self.manual_response_point_entry.configure(state=response_state)
+        self.manual_response_dir_entry.configure(state=response_state)
 
     def _load_config(self):
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")], initialdir="configs", title="Select Config")
