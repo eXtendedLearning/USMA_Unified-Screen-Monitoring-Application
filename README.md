@@ -45,7 +45,7 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
   - Classification (hit quality decisions)
   - File Saves (export confirmations)
 
-### v0.5.0 (Calibration Release)
+### v0.5.0 (Color Calibration Release)
 
 * **Startup Dialog** - Application now shows config selection or new calibration prompt at launch
 * **HSV Color Filter Calibration** - New dedicated window with live preview for tuning HSV color filter parameters
