@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) - v0.5.2 (UI Polish Release)
+# USMA (Unified Screen Monitoring Application) - v0.5.2
 
 A professional-grade GUI application for real-time screen monitoring, signal analysis, and Optical Character Recognition (OCR) designed for modal analysis workflows. USMA captures screen regions, reconstructs FRF signals, performs dual-method quality classification, and exports data in industry-standard UNV Dataset 58 format.
 
