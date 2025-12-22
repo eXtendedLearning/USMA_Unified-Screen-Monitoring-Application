@@ -421,7 +421,7 @@ class ScreenMonitor:
         self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.thread.start()
-        logger.info("Screen monitoring thread started for USMA v0.5.0")
+        logger.info("Screen monitoring thread started for USMA v0.5.2)
         return True
 
     def stop(self):
@@ -1587,7 +1587,7 @@ class StartupDialog(tk.Toplevel):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("USMA v0.5.0 - Startup")
+        self.title("USMA v0.5.2 - Startup")
         self.result = None
 
         # Don't use transient() with hidden parent - causes display issues on Windows
@@ -1635,7 +1635,7 @@ class StartupDialog(tk.Toplevel):
         title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
         ttk.Label(title_frame, text="USMA - Unified Screen Monitoring Application",
                   font=("Segoe UI", 11, "bold")).pack()
-        ttk.Label(title_frame, text="v0.5.0 - Calibration Release",
+        ttk.Label(title_frame, text="v0.5.2 - Calibration Release",
                   font=("Segoe UI", 9)).pack()
 
         separator = ttk.Separator(self, orient=tk.HORIZONTAL)
@@ -2899,7 +2899,7 @@ class GraphViewerFrame(ttk.LabelFrame):
 class MonitorControlGUI:
     def __init__(self, root, config_path=None):
         self.root = root
-        self.root.title("USMA v0.5.0 - Calibration Release")
+        self.root.title("USMA v0.5.2 - Calibration Release")
         self.root.geometry("1000x750")
 
         # Use provided config path or default
