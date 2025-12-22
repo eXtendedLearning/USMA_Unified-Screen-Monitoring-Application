@@ -653,8 +653,8 @@ class ScreenMonitor:
 
         has_changed = (frame_result.avg_energy_ratio is not None and 
                        (self.last_logged_ratio is None or 
-                        not np.isclose(frame_result.avg_energy_ratio, self.last_logged_ratio, atol=1e-9) or
-                        not np.isclose(frame_result.avg_high_freq_energy, self.last_logged_energy, atol=1e-9)))
+                        not np.isclose(frame_result.avg_energy_ratio, self.last_logged_ratio, atol=1e-5) or
+                        not np.isclose(frame_result.avg_high_freq_energy, self.last_logged_energy, atol=1e-5)))
 
         if has_changed:
             points = frame_result.points_info
@@ -1998,8 +1998,8 @@ class ROITypeDialog(tk.Toplevel):
         self.result = None
         self.region_name = region_name
 
-        self.geometry("350x200")
-        self.resizable(False, False)
+        self.geometry("350x280")
+        self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
 
