@@ -421,7 +421,7 @@ class ScreenMonitor:
         self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.thread.start()
-        logger.info("Screen monitoring thread started for USMA v0.5.2)
+        logger.info("Screen monitoring thread started for USMA v0.5.2")
         return True
 
     def stop(self):
