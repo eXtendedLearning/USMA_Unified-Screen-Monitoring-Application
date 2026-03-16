@@ -17,24 +17,24 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v0.5.2 (UI Enhancement Release)
+USMA (Unified Screen Monitoring Application) - v0.9.0 (Calibration Wizard Release)
 
 A professional-grade GUI application for real-time screen monitoring, signal
 analysis, and OCR designed for modal analysis workflows. Captures screen regions,
-reconstructs FRF signals, performs dual-method quality classification (FFT +
-Lowpass), and exports data in industry-standard formats (UNV Dataset 58).
+reconstructs FRF/PSD/Coherence signals, performs dual-method quality classification
+(FFT + Lowpass), and exports data in industry-standard formats (UNV Dataset 58).
 
 Key Features:
+- Calibration Wizard: CalibrationChoiceDialog for Default vs Calibration mode
+- Calibration Mode UI: Good/Bad/Ignore signal classification buttons
+- 5-level calibration status bar (Not Calibrated → Robust)
+- Multi-signal console output: FRF + PSD + Coherence summary per hit
+- PSD analysis with independent parameter tuning
+- Coherence analysis with trend tracking (Improving/Stable/Degrading)
 - Startup dialog for config selection or new calibration workflow
 - HSV color filter calibration with live preview
-- Mandatory ROI type selection when drawing regions  
-- Pre-load existing config in editor for modification
-- Live analysis parameter adjustment during monitoring
-- Scrollable main GUI with embedded console output
-- Continuous logging mode for HSV debugging ("Log on Events Only" toggle)
 - Dual classification: FFT energy ratio + Lowpass residual analysis
 - Live graph viewer with hit navigation and multiple plot types
-- Organized image logging (ROIs, Masks, Signals, FFT, Lowpass, Residual)
 - UNV Dataset 58 export format
 - DPI-aware rendering for high-resolution displays
 - Fast screen capture via mss library with pyautogui fallback
@@ -63,7 +63,7 @@ import logging
 import re
 import gc
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, colorchooser
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, List, Tuple
 from contextlib import contextmanager
@@ -227,6 +227,8 @@ class MonitoringRegion:
     resp_dof: int = field(default=3)
     ref_node: int = field(default=1)
     ref_dof: int = field(default=3)
+    y_scale_type: str = field(default="linear")  # "linear", "dB", "log", "ln" — metadata for display
+    overlay_color: str = field(default="")  # Custom overlay color (hex). Empty = use type default.
 
 @dataclass
 class FRFAnalysisResult:
@@ -268,6 +270,73 @@ class LightweightHitData:
     x_axis_max: float
     hit_key: str
     run: str
+    signal_type: str = "frf"  # "frf", "psd", or "coherence"
+
+# ---------------------------------------------------------------------------
+# NEW v0.6.0 DATACLASSES
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CalibrationSignal:
+    """Single calibration signal with expert judgment and raw analysis data."""
+    signal_physical: np.ndarray
+    fft_freqs: np.ndarray
+    fft_mags: np.ndarray
+    residual_physical: np.ndarray
+    energy_ratio: float
+    exceedance_ratio: float
+    exceedance_count: int
+    total_energy: float
+    high_freq_energy: float
+    judgment: str  # "GOOD", "BAD", or "IGNORE"
+    timestamp: str
+    roi_name: str
+    source: str = "calibration_phase"  # "calibration_phase" or "live_monitoring"
+
+@dataclass
+class CalibrationSession:
+    """Complete calibration session: signals, estimated params, and metadata."""
+    signals: List['CalibrationSignal'] = field(default_factory=list)
+    estimated_params: Optional[dict] = None
+    config_name: str = ""
+    created_at: str = ""
+    last_updated: str = ""
+    confidence_level: int = 0  # 0-4 per §2.6.6
+
+@dataclass
+class CoherenceAnalysisResult:
+    """Result of coherence analysis for a single captured snapshot."""
+    signal_physical: np.ndarray          # Raw coherence values (0 to 1)
+    inverted_signal: np.ndarray          # (1 - coherence) values
+    badness_integral: float              # ∫(1−γ²)df over full band
+    normalized_badness: float            # badness_integral / freq_span
+    mean_coherence: float                # Average coherence value
+    min_coherence: float                 # Minimum coherence value
+    band_badness: List[float]            # Per-band (4 bands) badness values
+    freq_axis: np.ndarray                # Frequency axis
+    roi_image: Optional[np.ndarray] = None
+    color_mask: Optional[np.ndarray] = None
+
+@dataclass
+class CoherenceTrackingState:
+    """Tracks coherence evolution within a run across multiple hits."""
+    run_name: str = ""
+    hit_count: int = 0
+    snapshots: List[CoherenceAnalysisResult] = field(default_factory=list)
+    trend: str = "UNKNOWN"  # "IMPROVING", "STABLE", "DEGRADING", "INSUFFICIENT_DATA"
+
+@dataclass
+class LightweightCoherenceData:
+    """Lightweight copy of coherence data for the graph viewer (avoids memory bloat)."""
+    signal_physical: np.ndarray
+    inverted_signal: np.ndarray
+    normalized_badness: float
+    mean_coherence: float
+    freq_axis: np.ndarray
+    hit_number: int
+    run: str
+
+# ---------------------------------------------------------------------------
 
 @dataclass
 class FrameAnalysisResult:
@@ -284,6 +353,16 @@ class FrameAnalysisResult:
     avg_exceedance_ratio: Optional[float] = None
     overall_lowpass_bad: Optional[bool] = None
     ocr_images: Dict[str, np.ndarray] = field(default_factory=dict)
+    # --- PSD results (v0.6.0) ---
+    psd_results: Dict[str, FRFAnalysisResult] = field(default_factory=dict)
+    psd_overall_is_hf: Optional[bool] = None
+    psd_avg_energy_ratio: Optional[float] = None
+    psd_avg_exceedance_count: Optional[float] = None
+    psd_avg_exceedance_ratio: Optional[float] = None
+    psd_overall_lowpass_bad: Optional[bool] = None
+    # --- Coherence results (v0.6.0) ---
+    coherence_results: Dict[str, CoherenceAnalysisResult] = field(default_factory=dict)
+    current_averages: Optional[int] = None
 
 @dataclass
 class AppConfig:
@@ -297,6 +376,17 @@ class AppConfig:
     lowpass_filter_order: int = 7
     residual_threshold: float = 0.005
     exceedance_ratio_threshold: float = 0.7
+    # --- PSD Parameters (v0.6.0) — same defaults as FRF; tuned independently ---
+    psd_fft_cutoff_frequency: float = 0.07
+    psd_fft_energy_ratio_threshold: float = 0.006
+    psd_lowpass_cutoff: float = 0.07
+    psd_lowpass_filter_order: int = 7
+    psd_residual_threshold: float = 0.005
+    psd_exceedance_ratio_threshold: float = 0.7
+    # --- Coherence Parameters (v0.6.0) ---
+    coherence_threshold: float = 0.3          # Normalized badness threshold
+    coherence_degradation_pct: float = 0.20   # % increase in badness to flag degradation
+    hits_per_run: int = 5                     # Expected number of hits per run
 
 
 @contextmanager
@@ -375,6 +465,13 @@ class ScreenMonitor:
         
         self.run_history: Dict[str, Dict] = {}
         self.current_run: str = "Run 1"
+        # Phase 3: coherence tracking per run
+        self.coherence_tracking: Dict[str, CoherenceTrackingState] = {}
+
+        # OCR caching: only re-run OCR when ROI content changes significantly
+        self._ocr_cache: Dict[str, Any] = {}  # region_name -> last OCR result
+        self._ocr_roi_hash: Dict[str, float] = {}  # region_name -> last ROI hash
+        self._ocr_change_threshold: float = 5.0  # mean pixel difference to trigger re-OCR
 
     def _capture_screen(self) -> np.ndarray:
         """
@@ -421,7 +518,7 @@ class ScreenMonitor:
         self.last_known_overload = "Unknown"
         self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.thread.start()
-        logger.info("Screen monitoring thread started for USMA v0.5.2")
+        logger.info("Screen monitoring thread started for USMA v0.9.0")
         return True
 
     def stop(self):
@@ -474,6 +571,16 @@ class ScreenMonitor:
             config.lowpass_filter_order = metadata.get('lowpass_filter_order', config.lowpass_filter_order)
             config.residual_threshold = metadata.get('residual_threshold', config.residual_threshold)
             config.exceedance_ratio_threshold = metadata.get('exceedance_ratio_threshold', config.exceedance_ratio_threshold)
+            # --- New v0.6.0 fields (backward-compatible: all have dataclass defaults) ---
+            config.psd_fft_cutoff_frequency = metadata.get('psd_fft_cutoff_frequency', config.psd_fft_cutoff_frequency)
+            config.psd_fft_energy_ratio_threshold = metadata.get('psd_fft_energy_ratio_threshold', config.psd_fft_energy_ratio_threshold)
+            config.psd_lowpass_cutoff = metadata.get('psd_lowpass_cutoff', config.psd_lowpass_cutoff)
+            config.psd_lowpass_filter_order = metadata.get('psd_lowpass_filter_order', config.psd_lowpass_filter_order)
+            config.psd_residual_threshold = metadata.get('psd_residual_threshold', config.psd_residual_threshold)
+            config.psd_exceedance_ratio_threshold = metadata.get('psd_exceedance_ratio_threshold', config.psd_exceedance_ratio_threshold)
+            config.coherence_threshold = metadata.get('coherence_threshold', config.coherence_threshold)
+            config.coherence_degradation_pct = metadata.get('coherence_degradation_pct', config.coherence_degradation_pct)
+            config.hits_per_run = metadata.get('hits_per_run', config.hits_per_run)
             
             logger.info(f"Config loaded - HSV Lower: {config.hsv_lower}, HSV Upper: {config.hsv_upper}")
             
@@ -588,23 +695,61 @@ class ScreenMonitor:
                 if analysis_result:
                     frame_result.frf_results[name] = analysis_result
                     frame_result.active_regions[name] = region
+            elif region.roi_type == 'psd':
+                psd_analysis = self._analyze_wave_pattern(roi, region, param_prefix='psd_')
+                if psd_analysis:
+                    frame_result.psd_results[name] = psd_analysis
+                    frame_result.active_regions[name] = region
+            elif region.roi_type == 'coherence':
+                coh_result = self._analyze_coherence_signal(roi, region)
+                if coh_result:
+                    frame_result.coherence_results[name] = coh_result
+                    frame_result.active_regions[name] = region
             elif OCR_AVAILABLE:
-                if region.roi_type == 'status':
-                    text, diag_imgs = self._analyze_status_robust(roi)
+                # Only re-run OCR if the ROI content has visually changed
+                ocr_changed = self._ocr_roi_changed(name, roi)
+                cache_key = f"{name}_{region.roi_type}"
+
+                if region.roi_type == 'averages':
+                    if ocr_changed:
+                        avg = self._analyze_averages_robust(roi)
+                        self._ocr_cache[cache_key] = avg
+                    else:
+                        avg = self._ocr_cache.get(cache_key)
+                    if avg:
+                        frame_result.current_averages = avg
+                elif region.roi_type == 'status':
+                    if ocr_changed:
+                        text, diag_imgs = self._analyze_status_robust(roi)
+                        self._ocr_cache[cache_key] = (text, diag_imgs)
+                    else:
+                        text, diag_imgs = self._ocr_cache.get(cache_key, ("Unknown", {}))
                     frame_result.status_text = text
                     frame_result.ocr_images.update(diag_imgs)
                 elif region.roi_type == 'overload':
-                    text, diag_imgs = self._analyze_overload_robust(roi)
+                    if ocr_changed:
+                        text, diag_imgs = self._analyze_overload_robust(roi)
+                        self._ocr_cache[cache_key] = (text, diag_imgs)
+                    else:
+                        text, diag_imgs = self._ocr_cache.get(cache_key, ("Unknown", {}))
                     frame_result.overload_text = text
                     frame_result.ocr_images.update(diag_imgs)
                 elif region.roi_type == 'run':
-                    run_str, diag_imgs = self._analyze_run_robust(roi)
+                    if ocr_changed:
+                        run_str, diag_imgs = self._analyze_run_robust(roi)
+                        self._ocr_cache[cache_key] = (run_str, diag_imgs)
+                    else:
+                        run_str, diag_imgs = self._ocr_cache.get(cache_key, (None, {}))
                     if run_str:
                         frame_result.points_info.run = run_str
                     frame_result.ocr_images.update(diag_imgs)
                     ocr_points_active = True
                 elif region.roi_type == 'hammer':
-                    point, direction, diag_imgs = self._analyze_point_and_dir_robust(roi, "hammer")
+                    if ocr_changed:
+                        point, direction, diag_imgs = self._analyze_point_and_dir_robust(roi, "hammer")
+                        self._ocr_cache[cache_key] = (point, direction, diag_imgs)
+                    else:
+                        point, direction, diag_imgs = self._ocr_cache.get(cache_key, (None, None, {}))
                     if point:
                         frame_result.points_info.hammer_point = point
                     if direction:
@@ -612,7 +757,11 @@ class ScreenMonitor:
                     frame_result.ocr_images.update(diag_imgs)
                     ocr_points_active = True
                 elif region.roi_type == 'response':
-                    point, direction, diag_imgs = self._analyze_point_and_dir_robust(roi, "response")
+                    if ocr_changed:
+                        point, direction, diag_imgs = self._analyze_point_and_dir_robust(roi, "response")
+                        self._ocr_cache[cache_key] = (point, direction, diag_imgs)
+                    else:
+                        point, direction, diag_imgs = self._ocr_cache.get(cache_key, (None, None, {}))
                     if point:
                         frame_result.points_info.response_point = point
                     if direction:
@@ -644,6 +793,15 @@ class ScreenMonitor:
             frame_result.avg_exceedance_ratio = np.mean([res.exceedance_ratio for res in frame_result.frf_results.values()])
             lp_classifications = [res.lowpass_is_bad_hit for res in frame_result.frf_results.values()]
             frame_result.overall_lowpass_bad = sum(lp_classifications) > len(lp_classifications) / 2 if lp_classifications else False
+
+        if frame_result.psd_results:
+            psd_class = [res.is_high_frequency for res in frame_result.psd_results.values()]
+            frame_result.psd_overall_is_hf = sum(psd_class) > len(psd_class) / 2
+            frame_result.psd_avg_energy_ratio = float(np.mean([res.energy_ratio for res in frame_result.psd_results.values()]))
+            frame_result.psd_avg_exceedance_count = float(np.mean([res.exceedance_count for res in frame_result.psd_results.values()]))
+            frame_result.psd_avg_exceedance_ratio = float(np.mean([res.exceedance_ratio for res in frame_result.psd_results.values()]))
+            psd_lp_class = [res.lowpass_is_bad_hit for res in frame_result.psd_results.values()]
+            frame_result.psd_overall_lowpass_bad = sum(psd_lp_class) > len(psd_lp_class) / 2
         
         return frame_result, all_rois
 
@@ -659,27 +817,79 @@ class ScreenMonitor:
         if has_changed:
             points = frame_result.points_info
             
-            fft_bad = frame_result.overall_is_hf
-            lp_bad = frame_result.overall_lowpass_bad if frame_result.overall_lowpass_bad is not None else False
-            
-            if fft_bad and lp_bad:
-                classification = "BAD HIT (Both FFT and Lowpass)"
-            elif fft_bad:
-                classification = "SUSPECT (FFT only)"
-            elif lp_bad:
-                classification = "SUSPECT (Lowpass only)"
-            else:
-                classification = "GOOD HIT"
-            
+            classification, _color = self.classify_hit(frame_result)
+
+            # --- Build multi-signal summary line ---
+            counter_key_tmp = f"{points.hammer_point}{points.response_point}"
+            hit_num = self.hit_counters.get(counter_key_tmp, 0) + 1
+
+            summary_parts = [f"[HIT #{hit_num}] {classification}"]
+
+            # FRF status
+            if frame_result.frf_results:
+                frf_fft_bad = frame_result.overall_is_hf or False
+                frf_lp_bad = frame_result.overall_lowpass_bad or False
+                if frf_fft_bad and frf_lp_bad:
+                    frf_status = "BAD"
+                elif frf_fft_bad or frf_lp_bad:
+                    detail = "FFT" if frf_fft_bad else "LP"
+                    frf_status = f"SUSPECT({detail})"
+                else:
+                    frf_status = "GOOD"
+                summary_parts.append(f"FRF: {frf_status}")
+
+            # PSD status
+            if frame_result.psd_results:
+                psd_fft_bad = frame_result.psd_overall_is_hf or False
+                psd_lp_bad = frame_result.psd_overall_lowpass_bad or False
+                if psd_fft_bad and psd_lp_bad:
+                    psd_status = "BAD"
+                elif psd_fft_bad or psd_lp_bad:
+                    detail = "FFT" if psd_fft_bad else "LP"
+                    psd_status = f"SUSPECT({detail})"
+                else:
+                    psd_status = "GOOD"
+                summary_parts.append(f"PSD: {psd_status}")
+
+            # Coherence status
+            if frame_result.coherence_results:
+                coh_values = list(frame_result.coherence_results.values())
+                avg_coh = sum(c.mean_coherence for c in coh_values) / len(coh_values)
+                # Determine trend from tracking state
+                trend = "UNKNOWN"
+                for _cname, cstate in self.coherence_tracking.items():
+                    trend = cstate.trend
+                    break
+                summary_parts.append(f"Coh: {avg_coh:.2f} ({trend})")
+
+            # Averages count
+            if frame_result.current_averages is not None:
+                avg_target = self.app_config.hits_per_run
+                summary_parts.append(f"Avg: {frame_result.current_averages}/{avg_target}")
+
+            summary_line = " | ".join(summary_parts)
+            logger.info(summary_line)
+
             if self.verbose_logging_enabled:
-                logger.info(f"--- WAVE EVENT DETECTED ---")
+                logger.info(f"--- WAVE EVENT DETAILS ---")
                 logger.info(f"  OCR Status: '{frame_result.status_text}'")
                 logger.info(f"  OCR Overload: '{frame_result.overload_text}'")
                 logger.info(f"  OCR Run: '{points.run}'")
                 logger.info(f"  OCR Hammer: '{points.hammer_point}' Dir: '{points.hammer_dir}'")
                 logger.info(f"  OCR Response: '{points.response_point}' Dir: '{points.response_dir}'")
-                logger.info(f"  FFT Energy Ratio: {frame_result.avg_energy_ratio:.3e} (threshold: {self.app_config.fft_energy_ratio_threshold:.3e}) -> {'BAD' if fft_bad else 'OK'}")
-                logger.info(f"  LP Exceedances: {frame_result.avg_exceedance_count:.0f} ({frame_result.avg_exceedance_ratio:.1%}) (threshold: {self.app_config.exceedance_ratio_threshold:.1%}) -> {'BAD' if lp_bad else 'OK'}")
+                if frame_result.frf_results:
+                    logger.info(f"  [FRF] FFT Energy Ratio: {frame_result.avg_energy_ratio:.3e} (thr: {self.app_config.fft_energy_ratio_threshold:.3e}) -> {'BAD' if frame_result.overall_is_hf else 'OK'}")
+                    logger.info(f"  [FRF] LP Exceedances: {frame_result.avg_exceedance_count:.0f} ({frame_result.avg_exceedance_ratio:.1%}) -> {'BAD' if frame_result.overall_lowpass_bad else 'OK'}")
+                if frame_result.psd_results:
+                    logger.info(f"  [PSD] FFT Energy Ratio: {frame_result.psd_avg_energy_ratio:.3e} (thr: {self.app_config.psd_fft_energy_ratio_threshold:.3e}) -> {'BAD' if frame_result.psd_overall_is_hf else 'OK'}")
+                    logger.info(f"  [PSD] LP Exceedances: {frame_result.psd_avg_exceedance_count:.0f} ({frame_result.psd_avg_exceedance_ratio:.1%}) -> {'BAD' if frame_result.psd_overall_lowpass_bad else 'OK'}")
+                if frame_result.coherence_results:
+                    coh_values = list(frame_result.coherence_results.values())
+                    for cname, cres in frame_result.coherence_results.items():
+                        logger.info(f"  [COH:{cname}] Mean: {cres.mean_coherence:.3f} | Badness: {cres.normalized_badness:.4f}")
+                    if self.coherence_tracking:
+                        for cname, cstate in self.coherence_tracking.items():
+                            logger.info(f"  [COH:{cname}] Trend: {cstate.trend} | Hits in run: {cstate.hit_count}")
                 logger.info(f"  CLASSIFICATION: {classification}")
                 logger.info(f"----------------------------")
             
@@ -731,9 +941,81 @@ class ScreenMonitor:
                         x_axis_min=region.x_axis_min,
                         x_axis_max=region.x_axis_max,
                         hit_key=hit_key,
-                        run=points.run
+                        run=points.run,
+                        signal_type="frf"
                     )
                     self.plot_callback(lightweight_data, self.run_history.copy())
+
+            # --- PSD results: fire separate plot_callback with psd_ prefix ---
+            for psd_name, psd_result in frame_result.psd_results.items():
+                region = frame_result.active_regions[psd_name]
+                psd_base = f"psd_{psd_name}_{counter_key}_{current_hit}"
+                hit_key_psd = f"psd_{counter_key}_{current_hit}"
+
+                self.run_history[self.current_run][hit_key_psd] = {
+                    'exceedance_count': psd_result.exceedance_count,
+                    'exceedance_ratio': psd_result.exceedance_ratio,
+                    'energy_ratio': psd_result.energy_ratio,
+                    'is_hf': psd_result.is_high_frequency,
+                    'lowpass_bad': psd_result.lowpass_is_bad_hit,
+                    'signal_type': 'psd',
+                }
+
+                if self.image_logging_enabled:
+                    self._create_visual_logs(psd_result, frame_result, psd_name, psd_base, all_rois)
+
+                if self.plot_callback:
+                    psd_lightweight = LightweightHitData(
+                        signal_physical=psd_result.signal_physical.copy() if psd_result.signal_physical is not None else np.array([]),
+                        filtered_physical=psd_result.filtered_physical.copy() if psd_result.filtered_physical is not None else None,
+                        residual_physical=psd_result.residual_physical.copy() if psd_result.residual_physical is not None else None,
+                        fft_freqs=psd_result.fft_freqs.copy(),
+                        fft_mags=psd_result.fft_mags.copy(),
+                        energy_ratio=psd_result.energy_ratio,
+                        is_high_frequency=psd_result.is_high_frequency,
+                        exceedance_count=psd_result.exceedance_count,
+                        exceedance_ratio=psd_result.exceedance_ratio,
+                        lowpass_is_bad_hit=psd_result.lowpass_is_bad_hit,
+                        total_energy=psd_result.total_energy,
+                        high_freq_energy=psd_result.high_freq_energy,
+                        y_axis_unit=region.y_axis_unit,
+                        x_axis_min=region.x_axis_min,
+                        x_axis_max=region.x_axis_max,
+                        hit_key=hit_key_psd,
+                        run=points.run,
+                        signal_type="psd"
+                    )
+                    self.plot_callback(psd_lightweight, self.run_history.copy())
+
+            # --- Coherence results: fire plot_callback with coherence signal ---
+            for coh_name, coh_result in frame_result.coherence_results.items():
+                region = frame_result.active_regions.get(coh_name)
+                if region is None:
+                    continue
+                hit_key_coh = f"coh_{counter_key}_{current_hit}"
+
+                if self.plot_callback:
+                    coh_lightweight = LightweightHitData(
+                        signal_physical=coh_result.signal_physical.copy(),
+                        filtered_physical=None,
+                        residual_physical=coh_result.inverted_signal.copy(),
+                        fft_freqs=coh_result.freq_axis.copy() if coh_result.freq_axis is not None else np.array([]),
+                        fft_mags=np.array([]),
+                        energy_ratio=coh_result.normalized_badness,
+                        is_high_frequency=False,
+                        exceedance_count=0,
+                        exceedance_ratio=0.0,
+                        lowpass_is_bad_hit=False,
+                        total_energy=coh_result.mean_coherence,
+                        high_freq_energy=coh_result.min_coherence,
+                        y_axis_unit="Coherence",
+                        x_axis_min=region.x_axis_min,
+                        x_axis_max=region.x_axis_max,
+                        hit_key=hit_key_coh,
+                        run=points.run,
+                        signal_type="coherence"
+                    )
+                    self.plot_callback(coh_lightweight, self.run_history.copy())
 
     def _handle_continuous_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
         """
@@ -757,7 +1039,7 @@ class ScreenMonitor:
         # Save images for all wave regions regardless of detection
         if self.image_logging_enabled:
             for region_name, region in self.app_config.regions.items():
-                if region.roi_type == 'frf' and region.enabled:
+                if region.roi_type in ('frf', 'psd') and region.enabled:
                     if region_name in all_rois:
                         roi = all_rois[region_name]
                         
@@ -780,7 +1062,18 @@ class ScreenMonitor:
     # =========================================================================
     # ENHANCED OCR METHODS
     # =========================================================================
-    
+
+    def _ocr_roi_changed(self, name: str, roi: np.ndarray) -> bool:
+        """Check if an OCR ROI has changed enough to warrant re-running OCR.
+        Uses mean pixel difference as a fast proxy for content change."""
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+        current_hash = float(np.mean(gray))
+        prev_hash = self._ocr_roi_hash.get(name)
+        self._ocr_roi_hash[name] = current_hash
+        if prev_hash is None:
+            return True  # First frame — must run OCR
+        return abs(current_hash - prev_hash) > self._ocr_change_threshold
+
     def _preprocess_for_ocr(self, roi: np.ndarray, scale_factor: int = 4, 
                             use_clahe: bool = True, use_sharpen: bool = True,
                             use_morphology: bool = False, invert: bool = True) -> np.ndarray:
@@ -1061,6 +1354,95 @@ class ScreenMonitor:
         return point, direction, diag_imgs
 
     # =========================================================================
+    # COHERENCE ANALYSIS METHODS (Phase 3)
+    # =========================================================================
+
+    def _analyze_averages_robust(self, roi: np.ndarray) -> int:
+        """OCR the 'averages' ROI to extract current hit/average count."""
+        if not OCR_AVAILABLE:
+            return 0
+        try:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            text = self._run_ocr_with_config(thresh, psm=7, whitelist='0123456789', load_dawgs=False)
+            digits = ''.join(c for c in text if c.isdigit())
+            return int(digits) if digits else 0
+        except Exception:
+            return 0
+
+    def _analyze_coherence_signal(self, roi: np.ndarray, region: MonitoringRegion) -> Optional['CoherenceAnalysisResult']:
+        """Analyze a coherence signal ROI using the same HSV-based extraction pipeline.
+        Coherence is always 0..1; badness = integral(1-gamma^2) / freq_span."""
+        try:
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            lower = np.array(self.app_config.hsv_lower)
+            upper = np.array(self.app_config.hsv_upper)
+            mask = cv2.inRange(hsv, lower, upper)
+            if not self._validate_signal_quality(mask):
+                return None
+
+            # Build signal vector (same as FRF)
+            signal_pixels = np.zeros(roi.shape[1], dtype=np.float64)
+            for col in range(roi.shape[1]):
+                col_pixels = np.where(mask[:, col] > 0)[0]
+                if len(col_pixels) > 0:
+                    signal_pixels[col] = float(roi.shape[0] - int(np.mean(col_pixels))) / roi.shape[0]
+                else:
+                    signal_pixels[col] = np.nan
+
+            # Fill NaN gaps
+            nans = np.isnan(signal_pixels)
+            if np.all(nans):
+                return None
+            indices = np.arange(len(signal_pixels))
+            signal_pixels[nans] = np.interp(indices[nans], indices[~nans], signal_pixels[~nans])
+
+            # Map to physical coherence [0, 1]
+            y_min = region.y_axis_min if region.y_axis_min != 0 else 0.0
+            y_max = region.y_axis_max if region.y_axis_max != 0 else 1.0
+            signal_physical = y_min + signal_pixels * (y_max - y_min)
+            signal_physical = np.clip(signal_physical, 0.0, 1.0)
+
+            # Build frequency axis
+            n = len(signal_physical)
+            freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, n)
+
+            inverted_signal = 1.0 - signal_physical
+            mean_coherence = float(np.mean(signal_physical))
+            min_coherence = float(np.min(signal_physical))
+
+            # Badness = area under (1 - gamma^2) / span
+            freq_span = max(region.x_axis_max - region.x_axis_min, 1.0)
+            badness_integral = float(np.trapezoid(inverted_signal, freq_axis))
+            normalized_badness = badness_integral / freq_span
+
+            # Per-band (4 bands) badness
+            band_size = n // 4
+            band_badness = []
+            for i in range(4):
+                start_i = i * band_size
+                end_i = (i + 1) * band_size if i < 3 else n
+                band_inv = inverted_signal[start_i:end_i]
+                band_freq = freq_axis[start_i:end_i]
+                band_badness.append(float(np.trapezoid(band_inv, band_freq)) / max(band_freq[-1] - band_freq[0], 1.0))
+
+            return CoherenceAnalysisResult(
+                signal_physical=signal_physical,
+                inverted_signal=inverted_signal,
+                badness_integral=badness_integral,
+                normalized_badness=normalized_badness,
+                mean_coherence=mean_coherence,
+                min_coherence=min_coherence,
+                band_badness=band_badness,
+                freq_axis=freq_axis,
+                roi_image=roi.copy(),
+                color_mask=mask.copy()
+            )
+        except Exception as e:
+            logger.error(f"Coherence analysis error: {e}")
+            return None
+
+    # =========================================================================
     # WAVE ANALYSIS METHODS
     # =========================================================================
 
@@ -1102,30 +1484,45 @@ class ScreenMonitor:
         ratio = count / len(residual) if len(residual) > 0 else 0.0
         return int(count), ratio
 
-    def _analyze_wave_pattern(self, roi: np.ndarray, region: MonitoringRegion) -> Optional[FRFAnalysisResult]:
-        if roi.size == 0:
-            return None
-        
-        # Debug: Log HSV filter values being used (only when verbose logging enabled)
-        if self.verbose_logging_enabled and self.verbose_log_options.log_config_values and self.frame_count % 20 == 0:  # Log every 20th frame to avoid spam
-            logger.info(f"[HSV DEBUG] Lower: {self.app_config.hsv_lower}, Upper: {self.app_config.hsv_upper}")
-            
+    def _reconstruct_signal_from_roi(
+        self, roi: np.ndarray, region: MonitoringRegion
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Shared signal reconstruction pipeline used by FRF, PSD, and Coherence analysis.
+
+        Applies HSV colour filter, validates signal quality, reconstructs the 1-D
+        pixel signal from the colour mask, and converts it to physical units.
+
+        Returns:
+            (signal_physical, color_mask, signal_pixels) on success, or None if the
+            signal quality check fails.
+        """
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array(self.app_config.hsv_lower), np.array(self.app_config.hsv_upper))
-        
-        # Debug: Log mask statistics (only when verbose logging AND mask debug enabled)
-        if self.verbose_logging_enabled and self.verbose_log_options.log_mask_debug and self.frame_count % 20 == 0:
+        mask = cv2.inRange(
+            hsv,
+            np.array(self.app_config.hsv_lower),
+            np.array(self.app_config.hsv_upper),
+        )
+
+        # Debug: Log mask statistics periodically
+        if (
+            self.verbose_logging_enabled
+            and self.verbose_log_options.log_mask_debug
+            and self.frame_count % 20 == 0
+        ):
             total_px = mask.shape[0] * mask.shape[1]
             white_px = np.count_nonzero(mask)
-            logger.info(f"[MASK DEBUG] White pixels: {white_px}/{total_px} ({100*white_px/total_px:.2f}%)")
-        
+            logger.info(
+                f"[MASK DEBUG] White pixels: {white_px}/{total_px} "
+                f"({100 * white_px / total_px:.2f}%)"
+            )
+
         if not self._validate_signal_quality(mask):
             return None
-        
+
         y_coords, x_coords = np.nonzero(mask)
-        width = mask.shape[1]
-        height = mask.shape[0]
-        
+        height, width = mask.shape
+
         if len(x_coords) == 0:
             signal_pixels = np.full(width, height / 2)
         else:
@@ -1134,45 +1531,97 @@ class ScreenMonitor:
             count_y = np.bincount(anchor_y_idx)
             anchor_y = sum_y / count_y
             if len(unique_x) < 2:
-                signal_pixels = np.full(width, anchor_y[0] if anchor_y.size > 0 else height / 2)
+                signal_pixels = np.full(
+                    width, anchor_y[0] if anchor_y.size > 0 else height / 2
+                )
             else:
                 signal_pixels = np.interp(np.arange(width), unique_x, anchor_y)
-        
+
+        # Invert y-axis: pixel 0 is top of image, but signal values increase upward
         signal_pixels = height - signal_pixels
-        
+
         if signal_pixels.size < 2:
             return None
-        
+
+        # Convert to physical units using region axis calibration
+        y_range = region.y_axis_max - region.y_axis_min
+        signal_physical = region.y_axis_min + (signal_pixels / height) * y_range
+
+        return signal_physical, mask, signal_pixels
+
+    def _analyze_wave_pattern(
+        self,
+        roi: np.ndarray,
+        region: MonitoringRegion,
+        param_prefix: str = "",
+    ) -> Optional[FRFAnalysisResult]:
+        if roi.size == 0:
+            return None
+
+        # Debug: Log HSV filter values being used periodically
+        if (
+            self.verbose_logging_enabled
+            and self.verbose_log_options.log_config_values
+            and self.frame_count % 20 == 0
+        ):
+            logger.info(
+                f"[HSV DEBUG] Lower: {self.app_config.hsv_lower}, Upper: {self.app_config.hsv_upper}"
+            )
+
+        # Delegate shared reconstruction to helper
+        reconstruction = self._reconstruct_signal_from_roi(roi, region)
+        if reconstruction is None:
+            return None
+        signal_physical, mask, signal_pixels = reconstruction
+
+        height = mask.shape[0]
+
+        # --- FFT analysis (uses param_prefix to select FRF or PSD parameters) ---
+        fft_cutoff = getattr(self.app_config, f"{param_prefix}fft_cutoff_frequency")
+        fft_threshold = getattr(self.app_config, f"{param_prefix}fft_energy_ratio_threshold")
+        lp_cutoff = getattr(self.app_config, f"{param_prefix}lowpass_cutoff")
+        lp_order = getattr(self.app_config, f"{param_prefix}lowpass_filter_order")
+        res_threshold = getattr(self.app_config, f"{param_prefix}residual_threshold")
+        exc_threshold = getattr(self.app_config, f"{param_prefix}exceedance_ratio_threshold")
+
         N = len(signal_pixels)
         detrended_pixels = signal_pixels - np.mean(signal_pixels)
         yf = rfft(detrended_pixels)
         xf = rfftfreq(N, 1)
         fft_mags = np.abs(yf)
-        total_energy = np.sum(fft_mags**2)
+        total_energy = np.sum(fft_mags ** 2)
         high_freq_energy, energy_ratio, is_hf = 0, 0, False
-        
+
         if total_energy > 1e-9:
-            cutoff_indices = np.where(xf >= self.app_config.fft_cutoff_frequency)[0]
+            cutoff_indices = np.where(xf >= fft_cutoff)[0]
             if cutoff_indices.size > 0:
-                high_freq_energy = np.sum(fft_mags[cutoff_indices[0]:]**2)
+                high_freq_energy = np.sum(fft_mags[cutoff_indices[0]:] ** 2)
                 energy_ratio = high_freq_energy / total_energy
-            is_hf = energy_ratio > self.app_config.fft_energy_ratio_threshold
-        
-        y_range = region.y_axis_max - region.y_axis_min
-        signal_physical = region.y_axis_min + (signal_pixels / height) * y_range
-        
+            is_hf = energy_ratio > fft_threshold
+
+        # --- Lowpass residual analysis ---
         signal_mean = np.mean(signal_physical)
         signal_detrended = signal_physical - signal_mean
-        
-        filtered_detrended = self._apply_lowpass_filter(signal_detrended)
+
+        # Apply lowpass filter using the selected parameter set
+        if len(signal_detrended) < 15:
+            filtered_detrended = signal_detrended.copy()
+        else:
+            try:
+                b, a = butter(lp_order, min(lp_cutoff, 0.99), btype="low")
+                filtered_detrended = filtfilt(b, a, signal_detrended)
+            except Exception as e:
+                logger.warning(f"Lowpass filter failed: {e}. Returning original signal.")
+                filtered_detrended = signal_detrended.copy()
+
         residual_physical = signal_detrended - filtered_detrended
         filtered_physical = filtered_detrended + signal_mean
-        
+
         exceedance_count, exceedance_ratio = self._calculate_exceedances(
-            residual_physical, self.app_config.residual_threshold
+            residual_physical, res_threshold
         )
-        lowpass_is_bad = exceedance_ratio > self.app_config.exceedance_ratio_threshold
-        
+        lowpass_is_bad = exceedance_ratio > exc_threshold
+
         return FRFAnalysisResult(
             is_high_frequency=is_hf,
             energy_ratio=energy_ratio,
@@ -1189,8 +1638,52 @@ class ScreenMonitor:
             exceedance_count=exceedance_count,
             exceedance_ratio=exceedance_ratio,
             lowpass_is_bad_hit=lowpass_is_bad,
-            y_axis_unit=region.y_axis_unit
+            y_axis_unit=region.y_axis_unit,
         )
+
+    def classify_hit(
+        self, frame_result: FrameAnalysisResult
+    ) -> Tuple[str, str]:
+        """
+        Determine hit quality classification from a FrameAnalysisResult.
+
+        Considers FRF dual-method results and PSD (Phase 2). Coherence
+        contribution added in Phase 3.
+
+        Returns:
+            (classification_text, severity_color) where severity_color is one of
+            "green", "orange", or "red".
+        """
+        frf_fft_bad = frame_result.overall_is_hf or False
+        frf_lp_bad = frame_result.overall_lowpass_bad or False
+        psd_fft_bad = frame_result.psd_overall_is_hf or False
+        psd_lp_bad = frame_result.psd_overall_lowpass_bad or False
+
+        any_bad = frf_fft_bad or frf_lp_bad or psd_fft_bad or psd_lp_bad
+        all_bad = (frf_fft_bad or frf_lp_bad) and (psd_fft_bad or psd_lp_bad) if (
+            frame_result.frf_results and frame_result.psd_results
+        ) else (frf_fft_bad and frf_lp_bad) or (psd_fft_bad and psd_lp_bad)
+
+        if not any_bad:
+            return "GOOD HIT", "green"
+
+        # Build detail string
+        reasons = []
+        if frf_fft_bad:
+            reasons.append("FRF-FFT")
+        if frf_lp_bad:
+            reasons.append("FRF-LP")
+        if psd_fft_bad:
+            reasons.append("PSD-FFT")
+        if psd_lp_bad:
+            reasons.append("PSD-LP")
+        detail = "+".join(reasons)
+
+        if all_bad:
+            return f"BAD HIT ({detail})", "red"
+        else:
+            return f"SUSPECT ({detail})", "orange"
+
 
     # =========================================================================
     # VISUAL LOGGING - THREAD-SAFE (Using Figure directly, not pyplot)
@@ -1587,7 +2080,7 @@ class StartupDialog(tk.Toplevel):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("USMA v0.5.2 - Startup")
+        self.title("USMA v0.9.0 - Startup")
         self.result = None
 
         # Don't use transient() with hidden parent - causes display issues on Windows
@@ -1635,7 +2128,7 @@ class StartupDialog(tk.Toplevel):
         title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
         ttk.Label(title_frame, text="USMA - Unified Screen Monitoring Application",
                   font=("Segoe UI", 11, "bold")).pack()
-        ttk.Label(title_frame, text="v0.5.2 - Calibration Release",
+        ttk.Label(title_frame, text="v0.9.0 - Calibration Wizard Release",
                   font=("Segoe UI", 9)).pack()
 
         separator = ttk.Separator(self, orient=tk.HORIZONTAL)
@@ -1691,6 +2184,84 @@ class StartupDialog(tk.Toplevel):
 
     def _on_cancel(self):
         """User closed dialog without selection."""
+        self.result = None
+        self.destroy()
+
+
+# --- 4a2. CALIBRATION CHOICE DIALOG ---
+class CalibrationChoiceDialog(tk.Toplevel):
+    """
+    Post-config-load dialog asking user to choose between
+    default parameters or calibration mode.
+
+    Attributes:
+        result: str - "DEFAULT" or "CALIBRATE" or None (cancelled)
+    """
+
+    def __init__(self, parent, config_name: str = ""):
+        super().__init__(parent)
+        self.title("USMA v0.9.0 - Parameter Selection")
+        self.result = None
+
+        self.geometry("420x320")
+        self.resizable(False, False)
+
+        # Center on screen
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - 210
+        y = (self.winfo_screenheight() // 2) - 160
+        self.geometry(f"+{x}+{y}")
+
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # Title
+        title_frame = ttk.Frame(self)
+        title_frame.pack(fill=tk.X, padx=20, pady=(20, 5))
+        ttk.Label(title_frame, text="Parameter Selection",
+                  font=("Segoe UI", 13, "bold")).pack()
+
+        if config_name:
+            ttk.Label(title_frame, text=f"Config: {os.path.basename(config_name)}",
+                      font=("Segoe UI", 9)).pack(pady=(2, 0))
+
+        ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=20, pady=10)
+
+        # Option 1: Default Parameters
+        default_frame = ttk.Frame(self)
+        default_frame.pack(fill=tk.X, padx=20, pady=5)
+        btn_default = tk.Button(default_frame, text="Use Default Parameters",
+                                font=("Segoe UI", 11, "bold"),
+                                bg="#3498DB", fg="white", activebackground="#2980B9",
+                                height=2, command=self._on_default)
+        btn_default.pack(fill=tk.X)
+        ttk.Label(default_frame,
+                  text="Start monitoring with the saved analysis parameters.\nBest when parameters are already tuned for your setup.",
+                  font=("Segoe UI", 8), justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
+
+        # Option 2: Calibrate
+        cal_frame = ttk.Frame(self)
+        cal_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+        btn_cal = tk.Button(cal_frame, text="Calibrate with Expert Feedback",
+                            font=("Segoe UI", 11, "bold"),
+                            bg="#E67E22", fg="white", activebackground="#D35400",
+                            height=2, command=self._on_calibrate)
+        btn_cal.pack(fill=tk.X)
+        ttk.Label(cal_frame,
+                  text="Classify signals as Good/Bad to auto-tune thresholds.\nRecommended for new setups or changed test conditions.",
+                  font=("Segoe UI", 8), justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
+
+        self.wait_window()
+
+    def _on_default(self):
+        self.result = "DEFAULT"
+        self.destroy()
+
+    def _on_calibrate(self):
+        self.result = "CALIBRATE"
+        self.destroy()
+
+    def _on_cancel(self):
         self.result = None
         self.destroy()
 
@@ -1990,7 +2561,7 @@ class ROITypeDialog(tk.Toplevel):
     Simple dialog to select ROI type after drawing a region.
     """
 
-    ROI_TYPES = ['frf', 'status', 'overload', 'run', 'hammer', 'response']
+    ROI_TYPES = ['frf', 'psd', 'coherence', 'averages', 'status', 'overload', 'run', 'hammer', 'response']
 
     def __init__(self, parent, region_name: str):
         super().__init__(parent)
@@ -2055,12 +2626,14 @@ class RegionOverlay(tk.Toplevel):
                 data = json.load(f)
             canvas = tk.Canvas(self, bg="white", highlightthickness=0)
             canvas.pack(fill=tk.BOTH, expand=True)
-            colors = {"frf": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
+            colors = {"frf": "#3498db", "psd": "#9b59b6", "coherence": "#1abc9c",
+                      "averages": "#95a5a6", "status": "#2ecc71", "overload": "#e74c3c",
                       "run": "#f1c40f", "hammer": "#f39c12", "response": "#e67e22"}
             for name, region_data in data.items():
                 if not name.startswith('_') and region_data.get('enabled', True):
                     x, y, w, h = region_data['x'], region_data['y'], region_data['width'], region_data['height']
-                    color = colors.get(region_data.get('roi_type', 'frf'), "#95a5a6")
+                    # Use custom overlay_color if set, otherwise type-based default
+                    color = region_data.get('overlay_color') or colors.get(region_data.get('roi_type', 'frf'), "#95a5a6")
                     canvas.create_rectangle(x-5, y-5, x+w+5, y+h+5, outline=color, width=2)
                     canvas.create_text(x-5, y-5, text=name, anchor="sw", font=("Arial", 10, "bold"), fill=color)
             canvas.create_text(self.winfo_screenwidth()-10, self.winfo_screenheight()-10, 
@@ -2192,17 +2765,31 @@ class ConfigToolWindow(tk.Toplevel):
             'width': tk.IntVar(), 'height': tk.IntVar(), 'roi_type': tk.StringVar(),
             'enabled': tk.BooleanVar(), 'x_axis_min': tk.DoubleVar(), 'x_axis_max': tk.DoubleVar(),
             'y_axis_min': tk.DoubleVar(), 'y_axis_max': tk.DoubleVar(), 'y_axis_unit': tk.StringVar(),
-            'resp_node': tk.IntVar(), 'resp_dof': tk.IntVar(), 'ref_node': tk.IntVar(), 'ref_dof': tk.IntVar()
+            'y_scale_type': tk.StringVar(value='linear'),
+            'resp_node': tk.IntVar(), 'resp_dof': tk.IntVar(), 'ref_node': tk.IntVar(), 'ref_dof': tk.IntVar(),
+            'overlay_color': tk.StringVar(value='')
         }
+        # Trace ROI type changes to update axis scaling visibility
+        self.editor_vars['roi_type'].trace_add('write', lambda *_: self._update_axis_scaling_visibility())
         
         f1 = ttk.Frame(editor_frame)
         f1.pack(fill=tk.X, pady=2, padx=5)
         ttk.Label(f1, text="Name:").pack(side=tk.LEFT)
         ttk.Entry(f1, textvariable=self.editor_vars['name'], width=15).pack(side=tk.LEFT, padx=2)
         ttk.Label(f1, text="Type:").pack(side=tk.LEFT, padx=(10,0))
-        ttk.Combobox(f1, textvariable=self.editor_vars['roi_type'], 
-                     values=['frf', 'status', 'overload', 'run', 'hammer', 'response'], 
+        ttk.Combobox(f1, textvariable=self.editor_vars['roi_type'],
+                     values=['frf', 'psd', 'coherence', 'averages', 'status', 'overload', 'run', 'hammer', 'response'],
                      state='readonly', width=10).pack(side=tk.LEFT, padx=2)
+
+        # Color picker row
+        f_color = ttk.Frame(editor_frame)
+        f_color.pack(fill=tk.X, pady=2, padx=5)
+        ttk.Label(f_color, text="Overlay Color:").pack(side=tk.LEFT)
+        self.color_preview_btn = ttk.Button(f_color, text="  Pick Color  ", command=self._pick_overlay_color)
+        self.color_preview_btn.pack(side=tk.LEFT, padx=4)
+        self.color_preview_label = ttk.Label(f_color, text="(default)")
+        self.color_preview_label.pack(side=tk.LEFT)
+        ttk.Button(f_color, text="Reset", command=self._reset_overlay_color, width=6).pack(side=tk.LEFT, padx=2)
         
         f_geom = ttk.Frame(editor_frame)
         f_geom.pack(fill=tk.X, pady=2, padx=5)
@@ -2215,17 +2802,17 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Label(f_geom, text="h:").pack(side=tk.LEFT)
         ttk.Entry(f_geom, textvariable=self.editor_vars['height'], width=5).pack(side=tk.LEFT, padx=2)
 
-        f_scale = ttk.LabelFrame(editor_frame, text="Physical Axis Scaling (wave)")
-        f_scale.pack(fill=tk.X, pady=5, padx=5)
-        
-        g = ttk.Frame(f_scale)
+        self.f_scale = ttk.LabelFrame(editor_frame, text="Physical Axis Scaling (wave)")
+        self.f_scale.pack(fill=tk.X, pady=5, padx=5)
+
+        g = ttk.Frame(self.f_scale)
         g.pack(fill=tk.X, padx=2, pady=2)
         ttk.Label(g, text="X-Min:").pack(side=tk.LEFT)
         ttk.Entry(g, textvariable=self.editor_vars['x_axis_min'], width=8).pack(side=tk.LEFT, padx=2)
         ttk.Label(g, text="X-Max:").pack(side=tk.LEFT)
         ttk.Entry(g, textvariable=self.editor_vars['x_axis_max'], width=8).pack(side=tk.LEFT, padx=2)
-        
-        g2 = ttk.Frame(f_scale)
+
+        g2 = ttk.Frame(self.f_scale)
         g2.pack(fill=tk.X, padx=2, pady=2)
         ttk.Label(g2, text="Y-Min:").pack(side=tk.LEFT)
         ttk.Entry(g2, textvariable=self.editor_vars['y_axis_min'], width=8).pack(side=tk.LEFT, padx=2)
@@ -2233,7 +2820,14 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Entry(g2, textvariable=self.editor_vars['y_axis_max'], width=8).pack(side=tk.LEFT, padx=2)
         ttk.Label(g2, text="Unit:").pack(side=tk.LEFT, padx=(5,0))
         ttk.Entry(g2, textvariable=self.editor_vars['y_axis_unit'], width=6).pack(side=tk.LEFT, padx=2)
-        
+        ttk.Label(g2, text="Scale:").pack(side=tk.LEFT, padx=(5,0))
+        ttk.Combobox(g2, textvariable=self.editor_vars['y_scale_type'],
+                     values=['linear', 'dB', 'log', 'ln'], state='readonly', width=6).pack(side=tk.LEFT, padx=2)
+
+        # Unit hint label (shown below axis scaling, changes per ROI type)
+        self.axis_unit_hint_label = ttk.Label(self.f_scale, text="", foreground="gray", font=("Segoe UI", 8, "italic"))
+        self.axis_unit_hint_label.pack(anchor=tk.W, padx=5, pady=(0,2))
+
         f_buttons = ttk.Frame(editor_frame)
         f_buttons.pack(fill=tk.X, pady=5, padx=5)
         ttk.Checkbutton(f_buttons, text="Enabled", variable=self.editor_vars['enabled']).pack(side=tk.LEFT)
@@ -2374,10 +2968,39 @@ class ConfigToolWindow(tk.Toplevel):
         self.region_listbox.activate(new_idx)
         self._on_listbox_select(None)
 
+    def _pick_overlay_color(self):
+        """Open color picker and store the chosen hex color."""
+        initial = self.editor_vars['overlay_color'].get() or None
+        result = colorchooser.askcolor(color=initial, title="Pick ROI overlay color", parent=self)
+        if result and result[1]:
+            hex_color = result[1]
+            self.editor_vars['overlay_color'].set(hex_color)
+            self.color_preview_label.config(text=hex_color, foreground=hex_color)
+
+    def _reset_overlay_color(self):
+        """Remove custom color (back to type-based default)."""
+        self.editor_vars['overlay_color'].set('')
+        self.color_preview_label.config(text="(default)", foreground="")
+
+    def _update_axis_scaling_visibility(self):
+        """Show/hide axis scaling section and update unit hint based on ROI type."""
+        roi_type = self.editor_vars['roi_type'].get()
+        WAVE_TYPES = {'frf', 'psd', 'coherence'}
+        UNIT_HINTS = {
+            'frf': 'Unit hint: e.g. g/N  (FRF amplitude, complex)',
+            'psd': 'Unit hint: N²/Hz  (Power Spectral Density)',
+            'coherence': 'Unit hint: 0–1 adimensional  (no unit, keep Y-Max=1)',
+        }
+        if roi_type in WAVE_TYPES:
+            self.f_scale.pack(fill=tk.X, pady=5, padx=5)
+            self.axis_unit_hint_label.config(text=UNIT_HINTS.get(roi_type, ''))
+        else:
+            self.f_scale.pack_forget()
+
     def _update_hsv_button_state(self):
         """Enable HSV calibration button only if wave regions exist."""
         wave_regions = {name: r for name, r in self.app_config.regions.items()
-                        if r.roi_type == 'frf'}
+                        if r.roi_type in ('frf', 'psd', 'coherence')}
         state = tk.NORMAL if wave_regions else tk.DISABLED
         self.hsv_cal_btn.config(state=state)
 
@@ -2388,7 +3011,7 @@ class ConfigToolWindow(tk.Toplevel):
             return
 
         wave_regions = {name: r for name, r in self.app_config.regions.items()
-                        if r.roi_type == 'frf'}
+                        if r.roi_type in ('frf', 'psd', 'coherence')}
 
         if not wave_regions:
             messagebox.showwarning("Warning", "No wave regions defined.", parent=self)
@@ -2448,16 +3071,17 @@ class ConfigToolWindow(tk.Toplevel):
 
     def _redraw_regions_on_canvas(self):
         self.canvas.delete("region")
-        colors = {"frf": "#3498db", "status": "#2ecc71", "overload": "#e74c3c", 
+        colors = {"frf": "#3498db", "psd": "#9b59b6", "coherence": "#1abc9c",
+                  "averages": "#95a5a6", "status": "#2ecc71", "overload": "#e74c3c",
                   "run": "#f1c40f", "hammer": "#f39c12", "response": "#e67e22"}
         if not hasattr(self, 'x_offset'):
-            return 
+            return
         for name, r in self.app_config.regions.items():
             x1 = r.x * self.scale + self.x_offset
             y1 = r.y * self.scale + self.y_offset
             x2 = (r.x + r.width) * self.scale + self.x_offset
             y2 = (r.y + r.height) * self.scale + self.y_offset
-            color = colors.get(r.roi_type, "white") if r.enabled else "gray"
+            color = (r.overlay_color or colors.get(r.roi_type, "white")) if r.enabled else "gray"
             self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2, tags=("region", name))
             self.canvas.create_text(x1+5, y1+5, text=name, fill=color, anchor="nw", tags=("region", name))
     
@@ -2466,9 +3090,17 @@ class ConfigToolWindow(tk.Toplevel):
             return
         self.selected_region_name = self.region_listbox.get(self.region_listbox.curselection()).replace(" (Disabled)", "")
         region_data = self.app_config.regions[self.selected_region_name]
-        for key, var in self.editor_vars.items(): 
+        for key, var in self.editor_vars.items():
             if hasattr(region_data, key):
                 var.set(getattr(region_data, key))
+        # Update color preview
+        custom_color = self.editor_vars['overlay_color'].get()
+        if custom_color:
+            self.color_preview_label.config(text=custom_color, foreground=custom_color)
+        else:
+            self.color_preview_label.config(text="(default)", foreground="")
+        # Update axis scaling visibility
+        self._update_axis_scaling_visibility()
 
     def _update_region_from_editor(self):
         if not self.selected_region_name:
@@ -2528,7 +3160,18 @@ class ConfigToolWindow(tk.Toplevel):
                 'lowpass_cutoff': self.app_config.lowpass_cutoff,
                 'lowpass_filter_order': self.app_config.lowpass_filter_order,
                 'residual_threshold': self.app_config.residual_threshold,
-                'exceedance_ratio_threshold': self.app_config.exceedance_ratio_threshold
+                'exceedance_ratio_threshold': self.app_config.exceedance_ratio_threshold,
+                # --- v0.6.0 PSD parameters ---
+                'psd_fft_cutoff_frequency': self.app_config.psd_fft_cutoff_frequency,
+                'psd_fft_energy_ratio_threshold': self.app_config.psd_fft_energy_ratio_threshold,
+                'psd_lowpass_cutoff': self.app_config.psd_lowpass_cutoff,
+                'psd_lowpass_filter_order': self.app_config.psd_lowpass_filter_order,
+                'psd_residual_threshold': self.app_config.psd_residual_threshold,
+                'psd_exceedance_ratio_threshold': self.app_config.psd_exceedance_ratio_threshold,
+                # --- v0.6.0 Coherence parameters ---
+                'coherence_threshold': self.app_config.coherence_threshold,
+                'coherence_degradation_pct': self.app_config.coherence_degradation_pct,
+                'hits_per_run': self.app_config.hits_per_run,
             }
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -2558,8 +3201,9 @@ class GraphViewerFrame(ttk.LabelFrame):
     """Embedded matplotlib graph viewer with hit navigation and console output."""
     
     PLOT_TYPES = ['Signal', 'FFT', 'Lowpass Comparison', 'Residual Analysis', 'Run Summary']
+    SIGNAL_SOURCES = ['All', 'FRF', 'PSD', 'Coherence']
     MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
-    
+
     def __init__(self, parent):
         super().__init__(parent, text="Live Graph & Console")
         self.current_plot_index = 0
@@ -2568,6 +3212,7 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.run_history = {}
         self.app_config = None
         self.text_handler = None  # Will be set up after console is created
+        self.signal_filter = "All"  # Current signal source filter
         
         self._setup_ui()
         
@@ -2602,7 +3247,23 @@ class GraphViewerFrame(ttk.LabelFrame):
         
         self.next_plot_btn = ttk.Button(plot_nav_frame, text=">", command=self._next_plot, width=3)
         self.next_plot_btn.pack(side=tk.LEFT, padx=2)
-        
+
+        # Signal Source filter with arrows
+        source_frame = ttk.LabelFrame(nav_frame, text="Signal")
+        source_frame.pack(side=tk.LEFT, padx=10)
+
+        self.prev_source_btn = ttk.Button(source_frame, text="<", command=self._prev_signal_source, width=3)
+        self.prev_source_btn.pack(side=tk.LEFT, padx=2)
+
+        self.signal_source_var = tk.StringVar(value="All")
+        self.signal_source_selector = ttk.Combobox(source_frame, textvariable=self.signal_source_var,
+                                                    values=self.SIGNAL_SOURCES, state='readonly', width=10)
+        self.signal_source_selector.pack(side=tk.LEFT, padx=2)
+        self.signal_source_selector.bind("<<ComboboxSelected>>", self._on_signal_source_changed)
+
+        self.next_source_btn = ttk.Button(source_frame, text=">", command=self._next_signal_source, width=3)
+        self.next_source_btn.pack(side=tk.LEFT, padx=2)
+
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
         
@@ -2658,16 +3319,20 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.console_text.configure(state='disabled')
     
     def _prev_hit(self):
-        if self.current_hit_index > 0:
-            self.current_hit_index -= 1
-            self._update_plot()
-            self._update_navigation_state()
-    
+        for i in range(self.current_hit_index - 1, -1, -1):
+            if self._matches_filter(self.hit_history[i]):
+                self.current_hit_index = i
+                self._update_plot()
+                self._update_navigation_state()
+                return
+
     def _next_hit(self):
-        if self.current_hit_index < len(self.hit_history) - 1:
-            self.current_hit_index += 1
-            self._update_plot()
-            self._update_navigation_state()
+        for i in range(self.current_hit_index + 1, len(self.hit_history)):
+            if self._matches_filter(self.hit_history[i]):
+                self.current_hit_index = i
+                self._update_plot()
+                self._update_navigation_state()
+                return
         
     def _prev_plot(self):
         self.current_plot_index = (self.current_plot_index - 1) % len(self.PLOT_TYPES)
@@ -2682,90 +3347,188 @@ class GraphViewerFrame(ttk.LabelFrame):
     def _on_plot_selected(self, event=None):
         self.current_plot_index = self.PLOT_TYPES.index(self.plot_type_var.get())
         self._update_plot()
+
+    def _on_signal_source_changed(self, event=None):
+        self.signal_filter = self.signal_source_var.get()
+        # Find last hit of this type in the full history
+        for i in range(len(self.hit_history) - 1, -1, -1):
+            if self._matches_filter(self.hit_history[i]):
+                self.current_hit_index = i
+                break
+        self._update_plot()
+        self._update_navigation_state()
+
+    def _prev_signal_source(self):
+        idx = self.SIGNAL_SOURCES.index(self.signal_source_var.get())
+        idx = (idx - 1) % len(self.SIGNAL_SOURCES)
+        self.signal_source_var.set(self.SIGNAL_SOURCES[idx])
+        self._on_signal_source_changed()
+
+    def _next_signal_source(self):
+        idx = self.SIGNAL_SOURCES.index(self.signal_source_var.get())
+        idx = (idx + 1) % len(self.SIGNAL_SOURCES)
+        self.signal_source_var.set(self.SIGNAL_SOURCES[idx])
+        self._on_signal_source_changed()
+
+    def _matches_filter(self, hit_data: LightweightHitData) -> bool:
+        if self.signal_filter == "All":
+            return True
+        filter_map = {"FRF": "frf", "PSD": "psd", "Coherence": "coherence"}
+        return hit_data.signal_type == filter_map.get(self.signal_filter, "")
+
+    def _get_filtered_history(self) -> List[LightweightHitData]:
+        return [h for h in self.hit_history if self._matches_filter(h)]
     
     def _update_navigation_state(self):
-        total = len(self.hit_history)
-        current = self.current_hit_index + 1 if total > 0 else 0
-        
-        self.hit_label.config(text=f"{current}/{total}")
-        
-        self.prev_hit_btn.config(state=tk.NORMAL if self.current_hit_index > 0 else tk.DISABLED)
-        self.next_hit_btn.config(state=tk.NORMAL if self.current_hit_index < total - 1 else tk.DISABLED)
-        
-        if total > 0 and 0 <= self.current_hit_index < total:
+        # Build filtered index list (positions in self.hit_history that match filter)
+        # NOTE: Uses index-based lookup to avoid numpy array __eq__ crash
+        filtered_indices = [i for i, h in enumerate(self.hit_history) if self._matches_filter(h)]
+        total = len(filtered_indices)
+
+        # Find current position within filtered list
+        current_pos = 0
+        if total > 0 and 0 <= self.current_hit_index < len(self.hit_history):
+            if self.current_hit_index in filtered_indices:
+                current_pos = filtered_indices.index(self.current_hit_index) + 1
+
+        self.hit_label.config(text=f"{current_pos}/{total}")
+
+        # Enable/disable based on whether there are prev/next filtered hits
+        has_prev = any(i < self.current_hit_index for i in filtered_indices)
+        has_next = any(i > self.current_hit_index for i in filtered_indices)
+        self.prev_hit_btn.config(state=tk.NORMAL if has_prev else tk.DISABLED)
+        self.next_hit_btn.config(state=tk.NORMAL if has_next else tk.DISABLED)
+
+        if 0 <= self.current_hit_index < len(self.hit_history):
             hit_data = self.hit_history[self.current_hit_index]
-            self.hit_info_label.config(text=f"Hit: {hit_data.hit_key}")
+            type_tag = hit_data.signal_type.upper()
+            self.hit_info_label.config(text=f"[{type_tag}] {hit_data.hit_key}")
         else:
             self.hit_info_label.config(text="No data")
         
     def update_data(self, lightweight_data: LightweightHitData, run_history: Dict, app_config: AppConfig = None):
         """Update with lightweight hit data."""
         self.hit_history.append(lightweight_data)
-        
+
         # Enforce history limit
         if len(self.hit_history) > self.MAX_HISTORY:
             self.hit_history = self.hit_history[-self.MAX_HISTORY:]
-        
+
         self.run_history = run_history
         if app_config:
             self.app_config = app_config
-        
-        self.current_hit_index = len(self.hit_history) - 1
-        
+
+        # Only auto-advance to this new signal if it matches the current filter
+        # (sticky selection: user's chosen filter persists across events)
+        new_idx = len(self.hit_history) - 1
+        if self._matches_filter(lightweight_data):
+            self.current_hit_index = new_idx
+
         self._update_plot()
         self._update_navigation_state()
         
     def _update_plot(self):
         if not self.hit_history or self.current_hit_index < 0:
             return
-        
+
         if self.current_hit_index >= len(self.hit_history):
             self.current_hit_index = len(self.hit_history) - 1
-            
+
         hit_data = self.hit_history[self.current_hit_index]
-        
-        self.ax.clear()
-        self.ax.set_facecolor('#2E2E2E')
-        self.ax.tick_params(axis='both', colors='white')
-        
         plot_type = self.plot_type_var.get()
-        
+
         try:
-            if plot_type == 'Signal':
-                self._plot_signal(hit_data)
-            elif plot_type == 'FFT':
-                self._plot_fft(hit_data)
-            elif plot_type == 'Lowpass Comparison':
-                self._plot_lowpass_comparison(hit_data)
-            elif plot_type == 'Residual Analysis':
-                self._plot_residual(hit_data)
-            elif plot_type == 'Run Summary':
-                self._plot_run_summary(hit_data)
-                
-            for spine in self.ax.spines.values():
-                spine.set_color('white')
-                
+            # Special case: "All" + "Signal" → stacked subplots for each signal type
+            if self.signal_filter == "All" and plot_type == "Signal":
+                self._plot_all_signals_stacked()
+            else:
+                self.figure.clear()
+                self.ax = self.figure.add_subplot(111)
+                self.ax.set_facecolor('#2E2E2E')
+                self.ax.tick_params(axis='both', colors='white')
+
+                if plot_type == 'Signal':
+                    self._plot_signal(hit_data)
+                elif plot_type == 'FFT':
+                    self._plot_fft(hit_data)
+                elif plot_type == 'Lowpass Comparison':
+                    self._plot_lowpass_comparison(hit_data)
+                elif plot_type == 'Residual Analysis':
+                    self._plot_residual(hit_data)
+                elif plot_type == 'Run Summary':
+                    self._plot_run_summary(hit_data)
+
+                for spine in self.ax.spines.values():
+                    spine.set_color('white')
+
         except Exception as e:
             logger.error(f"Error plotting {plot_type}: {e}")
-            self.ax.text(0.5, 0.5, f'Error: {str(e)[:50]}', 
+            self.figure.clear()
+            self.ax = self.figure.add_subplot(111)
+            self.ax.set_facecolor('#2E2E2E')
+            self.ax.text(0.5, 0.5, f'Error: {str(e)[:50]}',
                         transform=self.ax.transAxes, ha='center', va='center', color='red')
-            
+
         self.figure.tight_layout()
-        self.canvas.draw_idle()  # Use draw_idle instead of draw for efficiency
+        self.canvas.draw_idle()
+
+    def _plot_all_signals_stacked(self):
+        """When filter=All and plot=Signal, show all signal types stacked vertically."""
+        # Collect the latest hit of each type
+        latest_by_type = {}
+        for h in reversed(self.hit_history):
+            if h.signal_type not in latest_by_type:
+                latest_by_type[h.signal_type] = h
+            if len(latest_by_type) >= 3:
+                break
+
+        if not latest_by_type:
+            return
+
+        type_order = [t for t in ["frf", "psd", "coherence"] if t in latest_by_type]
+        n = len(type_order)
+        color_map = {"frf": "cyan", "psd": "#FF9800", "coherence": "#00E676"}
+
+        self.figure.clear()
+        for idx, sig_type in enumerate(type_order):
+            ax = self.figure.add_subplot(n, 1, idx + 1)
+            ax.set_facecolor('#2E2E2E')
+            ax.tick_params(axis='both', colors='white', labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color('white')
+
+            hit = latest_by_type[sig_type]
+            if hit.signal_physical is not None and len(hit.signal_physical) > 0:
+                num_pts = len(hit.signal_physical)
+                freq_ax = np.linspace(hit.x_axis_min, hit.x_axis_max, num_pts)
+                ax.plot(freq_ax, hit.signal_physical, color=color_map.get(sig_type, "cyan"), linewidth=1.2)
+                if sig_type == "coherence":
+                    ax.set_ylim(-0.05, 1.05)
+            ax.set_title(f'[{sig_type.upper()}] {hit.hit_key}', color='white', fontsize=8)
+            ax.set_ylabel(hit.y_axis_unit, color='white', fontsize=7)
+            if idx == n - 1:
+                ax.set_xlabel('Frequency (Hz)', color='white', fontsize=7)
+            ax.grid(True, linestyle='--', alpha=0.3)
         
     def _plot_signal(self, hit_data: LightweightHitData):
         if hit_data.signal_physical is None or len(hit_data.signal_physical) == 0:
-            self.ax.text(0.5, 0.5, 'No signal data', transform=self.ax.transAxes, 
+            self.ax.text(0.5, 0.5, 'No signal data', transform=self.ax.transAxes,
                         ha='center', va='center', color='white')
             return
-            
+
         num_points = len(hit_data.signal_physical)
         freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
-        
-        self.ax.plot(freq_axis, hit_data.signal_physical, color='cyan', linewidth=1.5)
+
+        type_tag = hit_data.signal_type.upper()
+        color_map = {"frf": "cyan", "psd": "#FF9800", "coherence": "#00E676"}
+        line_color = color_map.get(hit_data.signal_type, "cyan")
+
+        self.ax.plot(freq_axis, hit_data.signal_physical, color=line_color, linewidth=1.5)
         self.ax.set_xlabel('Frequency (Hz)', color='white')
         self.ax.set_ylabel(f'Amplitude ({hit_data.y_axis_unit})', color='white')
-        self.ax.set_title(f'Reconstructed Signal - {hit_data.hit_key}', color='white')
+        self.ax.set_title(f'[{type_tag}] Reconstructed Signal - {hit_data.hit_key}', color='white')
+        if hit_data.signal_type == "coherence":
+            self.ax.set_ylim(-0.05, 1.05)
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
     def _plot_fft(self, hit_data: LightweightHitData):
@@ -2897,9 +3660,10 @@ class GraphViewerFrame(ttk.LabelFrame):
 
 # --- 6. MAIN GUI ---
 class MonitorControlGUI:
-    def __init__(self, root, config_path=None):
+    def __init__(self, root, config_path=None, calibration_mode: bool = False):
         self.root = root
-        self.root.title("USMA v0.5.2 - Calibration Release")
+        self.calibration_mode = calibration_mode
+        self.root.title("USMA v0.9.0 - Calibration Wizard Release")
         self.root.geometry("1000x750")
 
         # Use provided config path or default
@@ -2999,18 +3763,24 @@ class MonitorControlGUI:
         self.status_light.grid(row=0, column=0, rowspan=2, padx=10, pady=5)
         
         self.class_var = tk.StringVar(value="Overall: --")
-        self.hf_ratio_var = tk.StringVar(value="FFT Ratio: --")
-        self.exceedance_var = tk.StringVar(value="LP Exc: --")
+        self.hf_ratio_var = tk.StringVar(value="FFT Ratio (FRF): --")
+        self.exceedance_var = tk.StringVar(value="LP Exc (FRF): --")
+        self.psd_ratio_var = tk.StringVar(value="FFT Ratio (PSD): --")
+        self.psd_exceedance_var = tk.StringVar(value="LP Exc (PSD): --")
+        self.coherence_var = tk.StringVar(value="Coherence: --")
         self.status_var = tk.StringVar(value="Status: --")
         self.overload_var = tk.StringVar(value="Overload: --")
         self.points_var = tk.StringVar(value="Points: --")
-        
+
         ttk.Label(feedback_frame, textvariable=self.class_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Label(feedback_frame, textvariable=self.hf_ratio_var, font=("Segoe UI", 10)).grid(row=0, column=2, sticky=tk.W, padx=5)
         ttk.Label(feedback_frame, textvariable=self.exceedance_var, font=("Segoe UI", 10)).grid(row=0, column=3, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.status_var, font=("Segoe UI", 10)).grid(row=1, column=1, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.overload_var, font=("Segoe UI", 10)).grid(row=1, column=2, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=1, column=3, columnspan=2, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.psd_ratio_var, font=("Segoe UI", 10)).grid(row=1, column=1, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.psd_exceedance_var, font=("Segoe UI", 10)).grid(row=1, column=2, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.coherence_var, font=("Segoe UI", 10)).grid(row=1, column=3, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.status_var, font=("Segoe UI", 10)).grid(row=2, column=1, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.overload_var, font=("Segoe UI", 10)).grid(row=2, column=2, sticky=tk.W, padx=5)
+        ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=2, column=3, columnspan=2, sticky=tk.W, padx=5)
         feedback_frame.columnconfigure(3, weight=1)
         
         # Graph viewer with reduced minimum height
@@ -3133,70 +3903,18 @@ class MonitorControlGUI:
         data_logging_frame.pack(fill=tk.X, side=tk.LEFT, padx=10, anchor=tk.N)
         ttk.Checkbutton(data_logging_frame, text="Log to .unv", variable=self.log_to_unv).pack(anchor=tk.W, pady=2)
 
-        # Analysis Parameters Frame (Live Tuning)
-        params_outer_frame = ttk.LabelFrame(right_panel, text="Analysis Parameters (Live)")
-        params_outer_frame.pack(fill=tk.X, pady=(10, 0))
+        # Store right_panel reference for dynamic panel swapping
+        self.right_panel = right_panel
 
-        # Initialize parameter variables from current config
-        self.param_vars = {
-            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
-            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
-            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
-            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
-            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
-        }
+        # --- Calibration status indicator (compact, shown in both modes) ---
+        self._setup_calibration_status_bar(right_panel)
 
-        # FFT Parameters row
-        fft_frame = ttk.Frame(params_outer_frame)
-        fft_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(fft_frame, text="FFT Cutoff:", width=12).pack(side=tk.LEFT)
-        fft_cutoff_spin = ttk.Spinbox(fft_frame, from_=0.01, to=0.5, increment=0.01,
-                                      textvariable=self.param_vars['fft_cutoff_frequency'],
-                                      width=7, command=self._apply_params_live)
-        fft_cutoff_spin.pack(side=tk.LEFT, padx=2)
-        fft_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
-
-        ttk.Label(fft_frame, text="E.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        fft_ratio_spin = ttk.Spinbox(fft_frame, from_=0.001, to=0.5, increment=0.001,
-                                     textvariable=self.param_vars['fft_energy_ratio_threshold'],
-                                     width=7, command=self._apply_params_live)
-        fft_ratio_spin.pack(side=tk.LEFT, padx=2)
-        fft_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
-
-        # Lowpass Parameters row
-        lp_frame = ttk.Frame(params_outer_frame)
-        lp_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(lp_frame, text="LP Cutoff:", width=12).pack(side=tk.LEFT)
-        lp_cutoff_spin = ttk.Spinbox(lp_frame, from_=0.01, to=0.5, increment=0.01,
-                                     textvariable=self.param_vars['lowpass_cutoff'],
-                                     width=7, command=self._apply_params_live)
-        lp_cutoff_spin.pack(side=tk.LEFT, padx=2)
-        lp_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
-
-        ttk.Label(lp_frame, text="Order:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        lp_order_spin = ttk.Spinbox(lp_frame, from_=1, to=10, increment=1,
-                                    textvariable=self.param_vars['lowpass_filter_order'],
-                                    width=4, command=self._apply_params_live)
-        lp_order_spin.pack(side=tk.LEFT, padx=2)
-        lp_order_spin.bind('<Return>', lambda e: self._apply_params_live())
-
-        # Residual Parameters row
-        res_frame = ttk.Frame(params_outer_frame)
-        res_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(res_frame, text="Res.Thr:", width=12).pack(side=tk.LEFT)
-        res_thr_spin = ttk.Spinbox(res_frame, from_=0.0001, to=0.1, increment=0.0005,
-                                   textvariable=self.param_vars['residual_threshold'],
-                                   width=8, format="%.4f", command=self._apply_params_live)
-        res_thr_spin.pack(side=tk.LEFT, padx=2)
-        res_thr_spin.bind('<Return>', lambda e: self._apply_params_live())
-
-        ttk.Label(res_frame, text="Exc.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.99, increment=0.01,
-                                     textvariable=self.param_vars['exceedance_ratio_threshold'],
-                                     width=7, command=self._apply_params_live)
-        exc_ratio_spin.pack(side=tk.LEFT, padx=2)
-        exc_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+        if self.calibration_mode:
+            # --- Calibration Mode Panel ---
+            self._setup_calibration_panel(right_panel)
+        else:
+            # --- Analysis Parameters Frame (Live Tuning) ---
+            self._setup_analysis_params(right_panel)
 
         self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
@@ -3264,29 +3982,43 @@ class MonitorControlGUI:
         self.root.after(0, self._update_feedback_ui, result)
         
     def _update_feedback_ui(self, result: FrameAnalysisResult):
-        if result.overall_is_hf is not None:
-            fft_bad = result.overall_is_hf
-            lp_bad = result.overall_lowpass_bad if result.overall_lowpass_bad is not None else False
-            
-            if fft_bad and lp_bad:
-                self.class_var.set("Overall: BAD HIT (Both)")
-                self.status_light.config(bg="red")
-            elif fft_bad or lp_bad:
-                method = "FFT" if fft_bad else "LP"
-                self.class_var.set(f"Overall: SUSPECT ({method})")
-                self.status_light.config(bg="orange")
-            else:
-                self.class_var.set("Overall: GOOD HIT")
-                self.status_light.config(bg="green")
-                
+        # --- Classification status light (uses combined FRF+PSD logic) ---
+        if result.overall_is_hf is not None or result.psd_overall_is_hf is not None:
+            classification, color = self.monitor.classify_hit(result)
+            self.class_var.set(f"Overall: {classification}")
+            self.status_light.config(bg=color)
+
+        # --- FRF readout ---
         if result.avg_energy_ratio is not None:
-            self.hf_ratio_var.set(f"FFT Ratio: {result.avg_energy_ratio:.3e}")
-            
+            self.hf_ratio_var.set(f"FFT Ratio (FRF): {result.avg_energy_ratio:.3e}")
         if result.avg_exceedance_count is not None:
-            self.exceedance_var.set(f"LP Exc: {result.avg_exceedance_count:.0f} ({result.avg_exceedance_ratio:.1%})")
-            
+            self.exceedance_var.set(f"LP Exc (FRF): {result.avg_exceedance_count:.0f} ({result.avg_exceedance_ratio:.1%})")
+
+        # --- PSD readout (if PSD regions exist) ---
+        if result.psd_avg_energy_ratio is not None:
+            self.psd_ratio_var.set(f"FFT Ratio (PSD): {result.psd_avg_energy_ratio:.3e}")
+        if result.psd_avg_exceedance_count is not None and result.psd_avg_exceedance_ratio is not None:
+            self.psd_exceedance_var.set(f"LP Exc (PSD): {result.psd_avg_exceedance_count:.0f} ({result.psd_avg_exceedance_ratio:.1%})")
+
+        # --- Coherence readout (if coherence ROIs exist) ---
+        if result.coherence_results:
+            coh_values = list(result.coherence_results.values())
+            avg_coh = float(sum(c.mean_coherence for c in coh_values) / len(coh_values))
+            avg_bad = float(sum(c.normalized_badness for c in coh_values) / len(coh_values))
+            # Determine trend from tracking state
+            trend = "UNKNOWN"
+            for _cname, cstate in self.monitor.coherence_tracking.items():
+                trend = cstate.trend
+                break
+            self.coherence_var.set(f"Coh: {avg_coh:.3f} ({trend}) | Bad: {avg_bad:.4f}")
+
+        # --- Status and overload ---
         self.status_var.set(f"Status: {result.status_text}")
-        self.overload_var.set(f"Overload: {result.overload_text}")
+        if result.current_averages is not None:
+            self.overload_var.set(f"Averages: {result.current_averages}")
+        else:
+            self.overload_var.set(f"Overload: {result.overload_text}")
+
         p = result.points_info
         self.points_var.set(f"Points: {p.run} | H: {p.hammer_point}{p.hammer_dir} | R: {p.response_point}{p.response_dir}")
         
@@ -3296,12 +4028,18 @@ class MonitorControlGUI:
             
     def _update_graph_viewer(self, lightweight_data: LightweightHitData, run_history: Dict):
         self.graph_viewer.update_data(lightweight_data, run_history, self.monitor.app_config)
+        # In calibration mode, notify the calibration panel of new signal
+        if self.calibration_mode and hasattr(self, 'cal_pending_signal'):
+            self._cal_on_new_signal(lightweight_data)
         
     def _reset_feedback_ui(self):
         self.class_var.set("Overall: --")
         self.status_light.config(bg="gray")
-        self.hf_ratio_var.set("FFT Ratio: --")
-        self.exceedance_var.set("LP Exc: --")
+        self.hf_ratio_var.set("FFT Ratio (FRF): --")
+        self.exceedance_var.set("LP Exc (FRF): --")
+        self.psd_ratio_var.set("FFT Ratio (PSD): --")
+        self.psd_exceedance_var.set("LP Exc (PSD): --")
+        self.coherence_var.set("Coherence: --")
         self.status_var.set("Status: --")
         self.overload_var.set("Overload: --")
         self.points_var.set("Points: --")
@@ -3390,7 +4128,241 @@ class MonitorControlGUI:
                 pass
 
         self.root.deiconify()
-        
+
+    def _setup_calibration_status_bar(self, parent):
+        """Create the compact calibration status indicator."""
+        self.cal_status_label_bar = tk.Label(parent, text="\u26A0 Not Calibrated",
+                                             font=("Segoe UI", 9, "bold"),
+                                             fg="white", bg="#E74C3C",
+                                             anchor=tk.CENTER, padx=8, pady=2)
+        self.cal_status_label_bar.pack(fill=tk.X, pady=(10, 0))
+        self._update_calibration_status(level=0, total_signals=0)
+
+    def _update_calibration_status(self, level: int, total_signals: int):
+        """Update the compact calibration status indicator."""
+        colors = {0: '#E74C3C', 1: '#F39C12', 2: '#F1C40F', 3: '#3498DB', 4: '#2ECC71'}
+        labels = {
+            0: "\u26A0 Not Calibrated",
+            1: f"\u26A0 Preliminary ({total_signals} signals)",
+            2: f"\u25D0 Basic ({total_signals} signals)",
+            3: f"\u25CF Solid ({total_signals} signals)",
+            4: f"\u2713 Robust ({total_signals} signals)"
+        }
+        fg = "white" if level != 2 else "black"  # Yellow bg needs dark text
+        self.cal_status_label_bar.config(
+            text=labels.get(level, "Unknown"),
+            bg=colors.get(level, '#E74C3C'),
+            fg=fg
+        )
+
+    def _setup_calibration_panel(self, parent):
+        """Create the compact calibration mode panel."""
+        # Calibration state
+        self.cal_good_count = 0
+        self.cal_bad_count = 0
+        self.cal_pending_signal = None
+
+        self.cal_frame = ttk.LabelFrame(parent, text="Calibration")
+        self.cal_frame.pack(fill=tk.X, pady=(5, 0))
+
+        # Row 1: Buttons + counter (all inline)
+        row1 = ttk.Frame(self.cal_frame)
+        row1.pack(fill=tk.X, padx=5, pady=3)
+
+        self.cal_good_btn = tk.Button(row1, text="\u2713 Good", font=("Segoe UI", 9, "bold"),
+                                      bg="#27AE60", fg="white", width=7, state=tk.DISABLED,
+                                      command=lambda: self._cal_classify("good"))
+        self.cal_good_btn.pack(side=tk.LEFT, padx=2)
+
+        self.cal_bad_btn = tk.Button(row1, text="\u2717 Bad", font=("Segoe UI", 9, "bold"),
+                                     bg="#E74C3C", fg="white", width=7, state=tk.DISABLED,
+                                     command=lambda: self._cal_classify("bad"))
+        self.cal_bad_btn.pack(side=tk.LEFT, padx=2)
+
+        self.cal_ignore_btn = tk.Button(row1, text="Skip", font=("Segoe UI", 9),
+                                        bg="#95A5A6", fg="white", width=5, state=tk.DISABLED,
+                                        command=lambda: self._cal_classify("ignore"))
+        self.cal_ignore_btn.pack(side=tk.LEFT, padx=2)
+
+        self.cal_counter_label = ttk.Label(row1, text="0G / 0B (need 3+3)",
+                                           font=("Segoe UI", 8))
+        self.cal_counter_label.pack(side=tk.LEFT, padx=(8, 2))
+
+        # Row 2: Status + Finish button
+        row2 = ttk.Frame(self.cal_frame)
+        row2.pack(fill=tk.X, padx=5, pady=(0, 3))
+
+        self.cal_status_label = ttk.Label(row2, text="Waiting for first signal...",
+                                          font=("Segoe UI", 8, "italic"))
+        self.cal_status_label.pack(side=tk.LEFT, padx=2)
+
+        self.cal_finish_btn = tk.Button(row2, text="Finish Calibration",
+                                        font=("Segoe UI", 9, "bold"),
+                                        bg="#3498DB", fg="white",
+                                        state=tk.DISABLED,
+                                        command=self._finish_calibration)
+        self.cal_finish_btn.pack(side=tk.RIGHT, padx=2)
+
+        # Initialize param_vars so _apply_params_live doesn't crash
+        self.param_vars = {
+            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
+            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
+            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
+            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
+            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
+            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
+        }
+
+    def _cal_on_new_signal(self, lightweight_data: LightweightHitData):
+        """Called when a new signal arrives in calibration mode — enable buttons."""
+        self.cal_pending_signal = lightweight_data
+        self.cal_good_btn.config(state=tk.NORMAL)
+        self.cal_bad_btn.config(state=tk.NORMAL)
+        self.cal_ignore_btn.config(state=tk.NORMAL)
+        sig_type = lightweight_data.signal_type.upper()
+        self.cal_status_label.config(text=f"[{sig_type}] Signal received — classify it now")
+
+    def _cal_classify(self, judgment: str):
+        """Handle Good/Bad/Ignore button click."""
+        if self.cal_pending_signal is None:
+            return
+
+        sig = self.cal_pending_signal
+        self.cal_pending_signal = None
+
+        # Disable buttons until next signal
+        self.cal_good_btn.config(state=tk.DISABLED)
+        self.cal_bad_btn.config(state=tk.DISABLED)
+        self.cal_ignore_btn.config(state=tk.DISABLED)
+
+        if judgment == "good":
+            self.cal_good_count += 1
+            logger.info(f"[CAL] Signal {sig.hit_key} classified as GOOD ({self.cal_good_count} total)")
+        elif judgment == "bad":
+            self.cal_bad_count += 1
+            logger.info(f"[CAL] Signal {sig.hit_key} classified as BAD ({self.cal_bad_count} total)")
+        else:
+            logger.info(f"[CAL] Signal {sig.hit_key} IGNORED")
+
+        total = self.cal_good_count + self.cal_bad_count
+        self.cal_counter_label.config(
+            text=f"Signals: {self.cal_good_count} Good, {self.cal_bad_count} Bad"
+                 f" {'(need 3+3 minimum)' if self.cal_good_count < 3 or self.cal_bad_count < 3 else '(ready)'}"
+        )
+
+        # Update calibration status bar level
+        if total == 0:
+            level = 0
+        elif total < 6 or self.cal_good_count < 3 or self.cal_bad_count < 3:
+            level = 1
+        elif total < 12:
+            level = 2
+        elif total < 20:
+            level = 3
+        else:
+            level = 4
+        self._update_calibration_status(level, total)
+
+        self.cal_status_label.config(text=f"Classified as {judgment.upper()} — waiting for next signal...")
+
+        # Enable Finish button once minimum signals reached
+        if self.cal_good_count >= 3 and self.cal_bad_count >= 3:
+            self.cal_finish_btn.config(state=tk.NORMAL)
+
+    def _finish_calibration(self):
+        """Transition from calibration mode to normal monitoring with editable params."""
+        logger.info(f"[CAL] Calibration finished: {self.cal_good_count} good, {self.cal_bad_count} bad signals")
+
+        # Destroy the calibration panel
+        if hasattr(self, 'cal_frame') and self.cal_frame.winfo_exists():
+            self.cal_frame.destroy()
+
+        # Exit calibration mode
+        self.calibration_mode = False
+
+        # Create the standard analysis parameters panel
+        self._setup_analysis_params(self.right_panel)
+
+        # Sync the param UI from current config values (which may have been updated by calibration)
+        self._sync_param_ui_from_config()
+
+        logger.info("[CAL] Switched to normal monitoring mode with editable parameters")
+
+    def _sync_param_ui_from_config(self):
+        """Sync parameter UI variables from the current app_config values."""
+        cfg = self.monitor.app_config
+        self.param_vars['fft_cutoff_frequency'].set(cfg.fft_cutoff_frequency)
+        self.param_vars['fft_energy_ratio_threshold'].set(cfg.fft_energy_ratio_threshold)
+        self.param_vars['lowpass_cutoff'].set(cfg.lowpass_cutoff)
+        self.param_vars['lowpass_filter_order'].set(cfg.lowpass_filter_order)
+        self.param_vars['residual_threshold'].set(cfg.residual_threshold)
+        self.param_vars['exceedance_ratio_threshold'].set(cfg.exceedance_ratio_threshold)
+
+    def _setup_analysis_params(self, parent):
+        """Create the Analysis Parameters (Live Tuning) frame."""
+        params_outer_frame = ttk.LabelFrame(parent, text="Analysis Parameters (Live)")
+        params_outer_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.param_vars = {
+            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
+            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
+            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
+            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
+            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
+            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
+        }
+
+        # FFT Parameters row
+        fft_frame = ttk.Frame(params_outer_frame)
+        fft_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(fft_frame, text="FFT Cutoff:", width=12).pack(side=tk.LEFT)
+        fft_cutoff_spin = ttk.Spinbox(fft_frame, from_=0.01, to=0.5, increment=0.01,
+                                      textvariable=self.param_vars['fft_cutoff_frequency'],
+                                      width=7, command=self._apply_params_live)
+        fft_cutoff_spin.pack(side=tk.LEFT, padx=2)
+        fft_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(fft_frame, text="E.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        fft_ratio_spin = ttk.Spinbox(fft_frame, from_=0.001, to=0.5, increment=0.001,
+                                     textvariable=self.param_vars['fft_energy_ratio_threshold'],
+                                     width=7, command=self._apply_params_live)
+        fft_ratio_spin.pack(side=tk.LEFT, padx=2)
+        fft_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Lowpass Parameters row
+        lp_frame = ttk.Frame(params_outer_frame)
+        lp_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(lp_frame, text="LP Cutoff:", width=12).pack(side=tk.LEFT)
+        lp_cutoff_spin = ttk.Spinbox(lp_frame, from_=0.01, to=0.5, increment=0.01,
+                                     textvariable=self.param_vars['lowpass_cutoff'],
+                                     width=7, command=self._apply_params_live)
+        lp_cutoff_spin.pack(side=tk.LEFT, padx=2)
+        lp_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(lp_frame, text="Order:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        lp_order_spin = ttk.Spinbox(lp_frame, from_=1, to=10, increment=1,
+                                    textvariable=self.param_vars['lowpass_filter_order'],
+                                    width=4, command=self._apply_params_live)
+        lp_order_spin.pack(side=tk.LEFT, padx=2)
+        lp_order_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Residual Parameters row
+        res_frame = ttk.Frame(params_outer_frame)
+        res_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(res_frame, text="Res.Thr:", width=12).pack(side=tk.LEFT)
+        res_thr_spin = ttk.Spinbox(res_frame, from_=0.0001, to=0.1, increment=0.0005,
+                                   textvariable=self.param_vars['residual_threshold'],
+                                   width=8, format="%.4f", command=self._apply_params_live)
+        res_thr_spin.pack(side=tk.LEFT, padx=2)
+        res_thr_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(res_frame, text="Exc.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
+        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.99, increment=0.01,
+                                     textvariable=self.param_vars['exceedance_ratio_threshold'],
+                                     width=7, command=self._apply_params_live)
+        exc_ratio_spin.pack(side=tk.LEFT, padx=2)
+        exc_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+
     def _toggle_monitoring(self):
         if self.is_monitoring.get():
             self.monitor.stop()
@@ -3502,9 +4474,16 @@ if __name__ == "__main__":
         saved_path = config_tool.saved_config_path  # Store before any potential issues
 
         if saved_path and os.path.exists(saved_path):
+            # Show calibration choice dialog
+            cal_dialog = CalibrationChoiceDialog(main_root, config_name=saved_path)
+            calibration_mode = (cal_dialog.result == "CALIBRATE")
+            if cal_dialog.result is None:
+                main_root.destroy()
+                sys.exit(0)
+
             # Load the saved config into main GUI and show
             main_root.deiconify()
-            app = MonitorControlGUI(main_root, config_path=saved_path)
+            app = MonitorControlGUI(main_root, config_path=saved_path, calibration_mode=calibration_mode)
             main_root.mainloop()
         else:
             # No config was saved - exit
@@ -3513,8 +4492,16 @@ if __name__ == "__main__":
     else:
         # Config file selected
         config_path = startup_result  # Store the path
+
+        # Show calibration choice dialog
+        cal_dialog = CalibrationChoiceDialog(temp_root, config_name=config_path)
+        calibration_mode = (cal_dialog.result == "CALIBRATE")
+        if cal_dialog.result is None:
+            temp_root.destroy()
+            sys.exit(0)
+
         temp_root.destroy()
 
         main_root = tk.Tk()
-        app = MonitorControlGUI(main_root, config_path=config_path)
+        app = MonitorControlGUI(main_root, config_path=config_path, calibration_mode=calibration_mode)
         main_root.mainloop()

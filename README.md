@@ -1,96 +1,16 @@
-# USMA (Unified Screen Monitoring Application) - v0.5.2
+# USMA (Unified Screen Monitoring Application) — v0.9.0
 
-A professional-grade GUI application for real-time screen monitoring, signal analysis, and Optical Character Recognition (OCR) designed for modal analysis workflows. USMA captures screen regions, reconstructs FRF signals, performs dual-method quality classification, and exports data in industry-standard UNV Dataset 58 format.
-
----
-
-## Key Features
-
-- **Startup Calibration Wizard** - Config selection or new calibration prompt at launch
-- **HSV Color Filter Calibration** - Live preview window with sliders, text entry, and zoom
-- **Real-time Screen Monitoring** - Fast capture using native OS APIs (mss library)
-- **Dual Classification System** - FFT energy ratio + Lowpass residual analysis
-- **Split-View Interface** - Live graph and console output displayed side-by-side
-- **Verbose Logging Options** - Selective debug output (config values, mask debug, OCR, FFT, etc.)
-- **OCR Integration** - Automatic extraction of test metadata (Run, Points, Direction)
-- **Industry-Standard Export** - UNV Dataset 58 file format
-- **Fully Portable** - No installation required, runs from USB drive
-
----
-
-## Version History
-
-### v0.5.2 (Current Release - UI Polish Release)
-
-* **Mask Logging Bug Fix** - Mask debug logging now respects the checkbox state (only logs when enabled)
-* **Logging Options Layout** - Reorganized from vertical (4x2) to horizontal (2x4) layout for better space usage
-* **Selective Manual Points** - Run/Hammer/Response fields now individually enabled when their OCR region is missing
-* **HSV Calibration Enhancements**:
-  - Added text entry fields for precise HSV min/max value input
-  - Preview images now stacked vertically (Original → Mask → Filtered)
-  - Added zoom controls (+/- buttons and mouse wheel) for detailed inspection
-  - Sliders and text entries stay synchronized
-
-### v0.5.1 (FRF ROI Release)
-
-* **FRF ROI Renamed** - "Wave" ROI type renamed to "FRF" for clarity (future versions will include other reconstructed signal types)
-* **Removed .mat Export** - MATLAB .mat export removed; UNV Dataset 58 is now the sole export format
-* **Split-View Interface** - Live graph and console now displayed side-by-side with resizable divider (replaces tabbed view)
-* **Verbose Logging Options** - New expandable menu for selective verbose logging:
-  - Config Values (HSV filter parameters)
-  - Mask Debug (pixel statistics)
-  - OCR Output (recognition results)
-  - FFT Data (energy calculations)
-  - Lowpass Data (filter results)
-  - Classification (hit quality decisions)
-  - File Saves (export confirmations)
-
-### v0.5.0 (Color Calibration Release)
-
-* **Startup Dialog** - Application now shows config selection or new calibration prompt at launch
-* **HSV Color Filter Calibration** - New dedicated window with live preview for tuning HSV color filter parameters
-* **Mandatory ROI Type Selection** - Drawing a new region now requires explicit type selection via dialog
-* **Pre-load Config in Editor** - Opening Edit Config with a loaded config pre-loads that config for modification
-* **Live Analysis Parameters** - Global analysis parameters moved to main GUI for real-time adjustment
-* **Scrollable Main GUI** - Main window now has scrollbars for smaller screens
-* **Embedded Console** - Graph Viewer includes console output (now split-view in v0.5.1)
-* **Continuous Logging Mode** - "Log on Events Only" toggle allows continuous output for HSV debugging
-
-### v0.4
-
-* **Performance: Faster Screen Capture** - Switched from pyautogui to mss library for 2-5x faster capture
-* **Compatibility: DPI Awareness** - Added explicit DPI awareness for Windows 10/11 with display scaling
-* **Lowpass Residual Analysis** - Added alternative classification method using Butterworth lowpass filter
-* **Dual Classification System** - Combined FFT and Lowpass methods for robust hit quality assessment
-* **Live Graph Viewer** - Central panel with matplotlib canvas and hit navigation
-* **Organized Image Logging** - Separate folders for each image type
-* **Fixed Dataset 58 Format** - Corrected UNV file header to comply with universal file format specification
+Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
 ---
 
 ## Quick Start
 
-1. **Extract all files** to the same folder:
-   ```
-   USMA/
-   ├── RUN_USMA_PORTABLE.bat   <- Double-click to start
-   ├── monitor_app.py
-   ├── requirements.txt
-   ├── python/                  <- Portable Python 3.11.9
-   └── external/tesseract/      <- Portable Tesseract OCR
-   ```
-
-2. **Double-click:** `RUN_USMA_PORTABLE.bat`
-
-3. **First Launch:** Choose to load existing config or create new calibration
-
-4. **New Calibration Workflow:**
-   - Take screenshot in Config Tool
-   - Draw regions and select their types (FRF for signal regions)
-   - Click "Calibrate Color Filter" to tune HSV values with live preview
-   - Save configuration
-
-5. **Start monitoring** and begin your impact test sequence
+1. Extract all files to the same folder
+2. Double-click `RUN_USMA_PORTABLE.bat`
+3. Choose an existing config or create a new one via the calibration wizard
+4. Draw ROI regions, set types, tune HSV color filter, save config
+5. Start monitoring and run your impact test sequence
 
 ---
 
@@ -98,25 +18,15 @@ A professional-grade GUI application for real-time screen monitoring, signal ana
 
 ```
 USMA/
-├── RUN_USMA_PORTABLE.bat   - Portable launcher (START HERE)
-├── monitor_app.py          - Main application
-├── requirements.txt        - Python dependencies
-│
-├── python/                 - Portable Python 3.11.9 with all dependencies
-├── external/tesseract/     - Portable Tesseract OCR engine
-│
-├── configs/                - Configuration files (JSON)
-├── logs/                   - Application logs
-├── image_logs/             - Visual logs (organized by type)
-│   ├── ROIs/
-│   ├── ColorMasks/
-│   ├── Signals/
-│   ├── FFT/
-│   ├── Lowpass/
-│   ├── Residual/
-│   ├── Summary/
-│   └── OCRs/
-└── signal_logs/            - Data files (.unv)
+├── RUN_USMA_PORTABLE.bat   ← Start here
+├── monitor_app.py
+├── requirements.txt
+├── python/                  ← Portable Python 3.11.9
+├── external/tesseract/      ← Portable Tesseract OCR
+├── configs/                 ← JSON configuration files
+├── logs/                    ← Application logs
+├── image_logs/              ← Visual logs (ROIs, masks, signals, FFT…)
+└── signal_logs/             ← UNV export files (.unv)
 ```
 
 ---
@@ -125,162 +35,116 @@ USMA/
 
 | Requirement | Specification |
 |-------------|---------------|
-| OS | Windows 10 or later (64-bit) |
-| Display | Any resolution, supports HiDPI scaling |
+| OS | Windows 10+ (64-bit) |
 | Disk Space | ~500 MB |
-| Python | Not required (included in portable bundle) |
+| Python | Included (portable) |
 | Admin Rights | Not required |
+
+---
+
+## ROI Types
+
+| Type | Purpose |
+|------|---------|
+| `frf` | FRF signal capture — FFT + Lowpass classification |
+| `psd` | PSD signal capture — independent parameter set *(v0.7.0)* |
+| `coherence` | Coherence plot monitoring *(v0.8.0)* |
+| `averages` | OCR read of average count *(v0.8.0)* |
+| `status` | System status text (Waiting / Measuring / Ready) |
+| `overload` | Overload indicator region |
+| `run` | Run number OCR |
+| `hammer` | Hammer point + direction OCR |
+| `response` | Response point + direction OCR |
 
 ---
 
 ## Classification System
 
-USMA uses a dual-method classification approach for robust hit quality assessment:
+Dual-method classification (FRF / PSD):
 
-### Method 1: FFT Energy Ratio
-- Computes normalized frequency spectrum
-- Calculates ratio of high-frequency to total energy
-- Configurable cutoff frequency and threshold
-
-### Method 2: Lowpass Residual Analysis
-- Applies Butterworth lowpass filter to signal
-- Measures residual (high-frequency content)
-- Counts exceedances above threshold
-- All calculations in physical units (g/N)
-
-### Combined Classification
-
-| FFT Result | Lowpass Result | Classification | Color |
-|------------|----------------|----------------|-------|
+| FFT | Lowpass | Result | Color |
+|-----|---------|--------|-------|
 | OK | OK | **GOOD HIT** | Green |
-| BAD | OK | **SUSPECT** | Orange |
-| OK | BAD | **SUSPECT** | Orange |
+| BAD | OK | **SUSPECT (FFT only)** | Orange |
+| OK | BAD | **SUSPECT (Lowpass only)** | Orange |
 | BAD | BAD | **BAD HIT** | Red |
 
 ---
 
-## Configuration
+## Output
 
-### Region Types
-
-| Type | Purpose |
-|------|---------|
-| `frf` | Signal capture region (FRF plot area) |
-| `status` | System status text (Waiting/Measuring/Ready) |
-| `overload` | Overload indicator region |
-| `run` | Run number text |
-| `hammer` | Hammer point and direction |
-| `response` | Response point and direction |
-
-### HSV Color Filter Calibration
-
-The HSV calibration window (accessible via "Calibrate Color Filter" in Config Tool) provides:
-- **Live preview** of Original, Mask, and Filtered views (stacked vertically)
-- **Dual input methods** - Sliders for quick adjustment, text entry for precise values
-- **Zoom controls** - Use +/- buttons or mouse wheel to inspect details
-- **Real-time updates** - See mask changes immediately as you adjust values
-
-**Tip:** For best results, the mask should show only the signal line as white pixels, with everything else black.
-
-### Manual Points Entry
-
-When OCR regions are not defined in your configuration, you can manually enter values:
-- **Run Number** - Current test run (enabled when Run OCR region is missing)
-- **Hammer Point/Direction** - Impact location and direction (enabled when Hammer OCR region is missing)
-- **Response Point/Direction** - Measurement location and direction (enabled when Response OCR region is missing)
-
-Each field is independently enabled based on which OCR regions are configured.
-
-### Verbose Logging Options
-
-Enable/disable specific logging categories (horizontal layout for compact display):
-- **Config Values** - HSV filter parameters logged periodically
-- **Mask Debug** - Pixel statistics for color mask analysis
-- **OCR Output** - Recognition results from text regions
-- **FFT Data** - Energy calculations and frequency analysis
-- **Lowpass Data** - Filter coefficients and residual statistics
-- **Classification** - Hit quality decision reasoning
-- **File Saves** - Confirmation of exported files
-
----
-
-## Output Format
-
-### UNV Dataset 58
-- Industry-standard universal file format
-- Compatible with: LMS TestLab, Siemens Simcenter, pyuff, MATLAB
-- Contains complete header with DOF identification
-- Real + Imaginary data pairs (imaginary = 0 for reconstructed signals)
-
----
-
-## Troubleshooting
-
-### Application does not start
-Check `run_log.txt` for detailed error messages.
-
-| Error | Solution |
-|-------|----------|
-| Python not found | Ensure `python/` folder exists with `python.exe` |
-| Tesseract not found | Ensure `external/tesseract/` folder exists |
-| monitor_app.py not found | Keep all files in the same folder |
-| DLL load failed | Reinstall Visual C++ Redistributable 2015-2022 |
-
-### HSV calibration not saving
-- Ensure you click "Apply" in the HSV Calibration window
-- Save the config after applying HSV changes
-- Check Console output for "Config loaded - HSV Lower/Upper" messages
-
-### Memory usage grows over time
-- Hit history is limited to 25 entries in the graph viewer
-- Restart application for very long sessions (500+ hits)
+- **UNV Dataset 58** — compatible with LMS TestLab, Siemens Simcenter, pyuff, MATLAB
+- Real data only (imaginary part zero for reconstructed signals)
 
 ---
 
 ## Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| mss | Fast screen capture (primary) |
-| pyautogui | Screen capture (fallback) |
-| opencv-python | Image processing |
-| numpy | Numerical operations |
-| scipy | Signal processing (FFT, filtering) |
-| matplotlib | Plotting and visualization |
-| Pillow | Image handling |
-| pytesseract | OCR wrapper |
-| sounddevice | Audio feedback (optional) |
+`mss`, `pyautogui`, `opencv-python`, `numpy`, `scipy`, `matplotlib`, `Pillow`, `pytesseract`, `sounddevice`
 
 ---
 
-## Known Limitations
+## Troubleshooting
 
-- OCR accuracy depends on screen resolution and text clarity
-- Audio feedback requires working audio device
-- Very high capture rates (>10 Hz) may stress CPU on older hardware
-- UNV export contains real-only data (imaginary part is zero)
+| Error | Solution |
+|-------|---------|
+| App doesn't start | Check `run_log.txt` |
+| Tesseract not found | Ensure `external/tesseract/` exists |
+| HSV not saving | Click "Apply" then save config |
+| Memory grows | History limited to 25 hits; restart for 500+ sessions |
 
 ---
 
-## Version Information
+## Version History
 
-| Component | Version |
-|-----------|---------|
-| USMA | 0.5.2 |
-| Python | 3.11.9 (Portable) |
-| Tesseract | 5.x (Portable) |
-| Package Size | ~350 MB |
+### v0.9.0 — Calibration Wizard Release *(current)*
+
+- **CalibrationChoiceDialog** — post-config dialog: "Use Default Parameters" or "Calibrate with Expert Feedback"
+- **Calibration Mode UI** — Good/Bad/Ignore buttons activate on signal detection; signal counter with 5-level status bar
+- **5-level calibration status bar** — Not Calibrated (red) → Robust (green), updates with each classification
+- **Signal Source selector** — dropdown in GraphViewer to filter by FRF, PSD, or Coherence signals
+- **Coherence plot callback** — coherence signals now sent to graph viewer alongside FRF and PSD
+- **Y-axis scale type** — new metadata field (linear/dB/log/ln) in region editor for display context
+- **Multi-signal console output** — single-line summary per hit: `[HIT #n] CLASSIFICATION | FRF | PSD | Coh | Avg`
+- **Dedicated feedback labels** — PSD and Coherence now have their own rows in Live Analysis Feedback
+
+### v0.8.0 — Coherence & OCR Release
+
+Implementation of Coherence ROI analysis, tracking, and Averages OCR readout tracking.
+
+### v0.7.0 — PSD Release
+
+Implementation of PSD ROI analysis, logging, UNV output, and combined FRF+PSD hit classification.
+
+### v0.6.0 — Foundation Release
+
+Infrastructure update introducing shared signal processing and data structures required by upcoming PSD, Coherence, and Calibration features:
+
+- **5 new dataclasses:** `CalibrationSignal`, `CalibrationSession`, `CoherenceAnalysisResult`, `CoherenceTrackingState`, `LightweightCoherenceData`
+- **`FrameAnalysisResult` extended** with PSD result fields, coherence results dict, and current averages
+- **`AppConfig` extended** with 6 independent PSD analysis parameters (`psd_fft_*`, `psd_lowpass_*`, `psd_residual_*`, `psd_exceedance_*`) and 3 coherence parameters (`coherence_threshold`, `coherence_degradation_pct`, `hits_per_run`)
+- **`_reconstruct_signal_from_roi()`** extracted as a shared helper — HSV→mask→signal pipeline reused by FRF, PSD, and future Coherence analysis
+- **`_analyze_wave_pattern()` parameterized** with `param_prefix` — enables PSD to run with independent parameters via `_analyze_wave_pattern(roi, region, param_prefix='psd_')`
+- **`classify_hit()` extracted** — centralises FRF classification logic; returns `(text, color)` tuple used by both `_handle_logging` and the GUI
+- **Config backward compatible** — existing v0.5.x configs load without error; new fields default gracefully
+- **3 new ROI types** in type dialog and region editor: `psd`, `coherence`, `averages`
+
+### v0.5.x — UI & FRF Polish *(2025)*
+
+- v0.5.2: Mask logging fix, horizontal logging layout, selective manual points, HSV calibration text entry + zoom
+- v0.5.1: FRF ROI rename, UNV-only export, split-view interface, verbose logging menu
+- v0.5.0: Startup wizard, HSV calibration window, mandatory ROI type selection, live analysis parameters, scrollable GUI
+
+### v0.4 — Performance & Analysis *(2025)*
+
+mss screen capture (2-5× faster), DPI awareness, lowpass residual analysis, dual classification, live graph viewer, UNV Dataset 58 format fix
+
+### v0.1–v0.3 — Prototype
+
+Initial screen monitoring, pyautogui capture, basic FRF reconstruction, early UNV export
 
 ---
 
 ## License
 
 Internal tool for modal analysis workflow optimization.
-
-## Support
-
-For issues:
-1. Check `logs/monitor_app.log` for errors
-2. Check Console panel (right side of Live Graph) for live debug info
-3. Enable specific verbose log options to diagnose issues
-4. Test with a minimal configuration first
