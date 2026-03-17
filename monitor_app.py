@@ -17,14 +17,24 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v0.9.0 (Calibration Wizard Release)
+USMA (Unified Screen Monitoring Application) - v0.9.1 (Calibration Engine Release)
 
 A professional-grade GUI application for real-time screen monitoring, signal
 analysis, and OCR designed for modal analysis workflows. Captures screen regions,
 reconstructs FRF/PSD/Coherence signals, performs dual-method quality classification
 (FFT + Lowpass), and exports data in industry-standard formats (UNV Dataset 58).
 
-Key Features:
+Key Features (v0.9.1):
+- Calibration Engine: HybridCalibrationEngine with three statistical methods
+  - PercentileBoundaryEstimator (Level 1+): midpoint/95th percentile boundaries
+  - BayesianThresholdEstimator (Level 2+): grid-based posterior with sigmoid likelihood
+  - ROCYoudenEstimator (Level 3+): Youden's J-statistic optimal thresholds
+- Calibration data persistence in config JSON (_calibration section)
+- Signal similarity detection (NCC + cosine similarity)
+- Automatic parameter application after each classified signal
+- Cross-validation with outlier rejection at Level 3+
+
+Key Features (v0.9.0):
 - Calibration Wizard: CalibrationChoiceDialog for Default vs Calibration mode
 - Calibration Mode UI: Good/Bad/Ignore signal classification buttons
 - 5-level calibration status bar (Not Calibrated → Robust)
@@ -302,6 +312,582 @@ class CalibrationSession:
     created_at: str = ""
     last_updated: str = ""
     confidence_level: int = 0  # 0-4 per §2.6.6
+
+# ---------------------------------------------------------------------------
+# v0.9.1 CALIBRATION ENGINE CLASSES
+# ---------------------------------------------------------------------------
+
+class PercentileBoundaryEstimator:
+    """
+    Level 1+ estimator. Finds threshold boundaries between Good/Bad distributions.
+
+    For threshold params: midpoint if cleanly separated, else 95th percentile of Good.
+    For filter params: sweep candidates and pick best Good/Bad separation.
+    """
+
+    def __init__(self):
+        self.good_signals: List[dict] = []
+        self.bad_signals: List[dict] = []
+
+    def add_signal(self, signal_data: dict, judgment: str):
+        """Add a classified signal. signal_data must contain: energy_ratio,
+        exceedance_ratio, exceedance_count, total_energy, high_freq_energy,
+        fft_freqs (np.ndarray), fft_mags (np.ndarray),
+        residual_physical (np.ndarray), signal_physical (np.ndarray)."""
+        if judgment == "GOOD":
+            self.good_signals.append(signal_data)
+        elif judgment == "BAD":
+            self.bad_signals.append(signal_data)
+
+    @property
+    def can_estimate(self) -> bool:
+        return len(self.good_signals) >= 3 and len(self.bad_signals) >= 3
+
+    def estimate(self) -> Optional[dict]:
+        """Return estimated parameters or None if insufficient data."""
+        if not self.can_estimate:
+            return None
+
+        params = {}
+
+        # --- 1. FFT Energy Ratio Threshold ---
+        good_ratios = [s['energy_ratio'] for s in self.good_signals]
+        bad_ratios = [s['energy_ratio'] for s in self.bad_signals]
+        params['fft_energy_ratio_threshold'] = self._find_boundary(good_ratios, bad_ratios)
+
+        # --- 2. Exceedance Ratio Threshold ---
+        good_exc = [s['exceedance_ratio'] for s in self.good_signals]
+        bad_exc = [s['exceedance_ratio'] for s in self.bad_signals]
+        params['exceedance_ratio_threshold'] = self._find_boundary(good_exc, bad_exc)
+
+        # --- 3. Residual Threshold ---
+        good_max_res = [float(np.max(np.abs(s['residual_physical'])))
+                        for s in self.good_signals]
+        bad_max_res = [float(np.max(np.abs(s['residual_physical'])))
+                       for s in self.bad_signals]
+        params['residual_threshold'] = self._find_boundary(good_max_res, bad_max_res)
+
+        # --- 4. Filter Parameter Sweep ---
+        params.update(self._sweep_filter_params())
+
+        return params
+
+    def _find_boundary(self, good_values: list, bad_values: list) -> float:
+        """Find threshold separating Good (low) from Bad (high) populations.
+
+        If cleanly separated: midpoint between max(Good) and min(Bad).
+        If overlapping: 95th percentile of Good (allows 5% false positive on Good).
+        """
+        max_good = max(good_values)
+        min_bad = min(bad_values)
+
+        if min_bad > max_good:
+            # Clean separation — midpoint
+            return (max_good + min_bad) / 2.0
+        else:
+            # Overlapping — use 95th percentile of Good distribution
+            return float(np.percentile(good_values, 95))
+
+    def _sweep_filter_params(self) -> dict:
+        """Sweep FFT cutoff and lowpass cutoff to find best separation.
+
+        For each candidate cutoff value, recompute the energy ratio for
+        all signals and measure the distance between Good and Bad means.
+        Pick the cutoff that maximises this distance.
+        """
+        best_fft_cutoff = 0.07  # default fallback
+        best_fft_score = -np.inf
+
+        all_signals = self.good_signals + self.bad_signals
+        labels = np.array([1]*len(self.good_signals) + [0]*len(self.bad_signals))
+
+        # Sweep FFT cutoff frequency
+        for fft_cut in np.arange(0.02, 0.25, 0.005):
+            ratios = []
+            for sig in all_signals:
+                xf = sig['fft_freqs']
+                mags = sig['fft_mags']
+                total = np.sum(mags ** 2)
+                if total < 1e-9:
+                    ratios.append(0.0)
+                    continue
+                cutoff_idx = np.where(xf >= fft_cut)[0]
+                if cutoff_idx.size > 0:
+                    hf = np.sum(mags[cutoff_idx[0]:] ** 2)
+                    ratios.append(hf / total)
+                else:
+                    ratios.append(0.0)
+
+            ratios = np.array(ratios)
+            good_mean = np.mean(ratios[labels == 1])
+            bad_mean = np.mean(ratios[labels == 0])
+            # We want bad_mean > good_mean (larger gap = better separation)
+            separation = bad_mean - good_mean
+            if separation > best_fft_score:
+                best_fft_score = separation
+                best_fft_cutoff = float(fft_cut)
+
+        # Sweep lowpass cutoff (coarser grid — recomputing residuals is expensive)
+        best_lp_cutoff = 0.07
+        best_lp_score = -np.inf
+
+        for lp_cut in np.arange(0.03, 0.20, 0.01):
+            exc_ratios = []
+            for sig in all_signals:
+                signal = sig['signal_physical']
+                if len(signal) < 15:
+                    exc_ratios.append(0.0)
+                    continue
+                try:
+                    detrended = signal - np.mean(signal)
+                    b, a = butter(7, min(lp_cut, 0.99), btype='low')
+                    filtered = filtfilt(b, a, detrended)
+                    residual = detrended - filtered
+                    med_res = np.median(np.abs(residual))
+                    test_thr = med_res * 2.0 if med_res > 0 else 0.001
+                    exc = np.sum(np.abs(residual) > test_thr) / len(residual)
+                    exc_ratios.append(exc)
+                except Exception:
+                    exc_ratios.append(0.0)
+
+            exc_ratios = np.array(exc_ratios)
+            good_mean = np.mean(exc_ratios[labels == 1])
+            bad_mean = np.mean(exc_ratios[labels == 0])
+            separation = bad_mean - good_mean
+            if separation > best_lp_score:
+                best_lp_score = separation
+                best_lp_cutoff = float(lp_cut)
+
+        return {
+            'fft_cutoff_frequency': best_fft_cutoff,
+            'lowpass_cutoff': best_lp_cutoff,
+        }
+
+
+class BayesianThresholdEstimator:
+    """
+    Level 2+ estimator. Maintains a posterior distribution over each
+    threshold parameter using grid-based Bayesian inference.
+
+    Prior: Uniform over a plausible range.
+    Likelihood: Sigmoid — P(grid_value is correct | observation).
+    Point estimate: MAP (maximum a posteriori).
+    Also computes 95% credible interval for confidence display.
+    """
+
+    PARAM_GRIDS = {
+        'fft_energy_ratio_threshold': (0.0005, 0.15, 300),
+        'exceedance_ratio_threshold': (0.05, 0.99, 300),
+        'residual_threshold': (0.0001, 0.10, 300),
+    }
+
+    def __init__(self):
+        self.grids = {}
+        self.posteriors = {}
+        for name, (lo, hi, n) in self.PARAM_GRIDS.items():
+            self.grids[name] = np.linspace(lo, hi, n)
+            self.posteriors[name] = np.ones(n) / n  # uniform prior
+        self._signal_count = 0
+
+    def update(self, signal_data: dict, judgment: str):
+        """Bayesian update with one new observation."""
+        if judgment not in ("GOOD", "BAD"):
+            return
+
+        self._signal_count += 1
+
+        metric_map = {
+            'fft_energy_ratio_threshold': signal_data.get('energy_ratio'),
+            'exceedance_ratio_threshold': signal_data.get('exceedance_ratio'),
+            'residual_threshold': (
+                float(np.max(np.abs(signal_data['residual_physical'])))
+                if 'residual_physical' in signal_data
+                   and signal_data['residual_physical'] is not None
+                else None
+            ),
+        }
+
+        for param_name, grid in self.grids.items():
+            observed = metric_map.get(param_name)
+            if observed is None:
+                continue
+
+            grid_range = grid[-1] - grid[0]
+            steepness = 20.0 / grid_range
+
+            if judgment == "GOOD":
+                # Good signal: threshold should be ABOVE the observed value
+                likelihood = 1.0 / (1.0 + np.exp(-steepness * (grid - observed)))
+            else:
+                # Bad signal: threshold should be BELOW the observed value
+                likelihood = 1.0 / (1.0 + np.exp(-steepness * (observed - grid)))
+
+            # Avoid zeros
+            likelihood = np.clip(likelihood, 1e-10, 1.0)
+
+            # Bayesian update: posterior ∝ prior × likelihood
+            self.posteriors[param_name] *= likelihood
+            total = np.sum(self.posteriors[param_name])
+            if total > 0:
+                self.posteriors[param_name] /= total
+            else:
+                # Degenerate — reset to uniform
+                n = len(grid)
+                self.posteriors[param_name] = np.ones(n) / n
+
+    @property
+    def can_estimate(self) -> bool:
+        return self._signal_count >= 6
+
+    def estimate(self) -> Optional[dict]:
+        """Return MAP estimates and 95% credible intervals."""
+        if not self.can_estimate:
+            return None
+
+        result = {}
+        for name, grid in self.grids.items():
+            posterior = self.posteriors[name]
+
+            # MAP estimate
+            map_idx = np.argmax(posterior)
+            result[name] = float(grid[map_idx])
+
+            # 95% credible interval
+            cumulative = np.cumsum(posterior)
+            ci_low_idx = np.searchsorted(cumulative, 0.025)
+            ci_high_idx = np.searchsorted(cumulative, 0.975)
+            result[f'{name}_ci_low'] = float(grid[min(ci_low_idx, len(grid)-1)])
+            result[f'{name}_ci_high'] = float(grid[min(ci_high_idx, len(grid)-1)])
+            result[f'{name}_ci_width'] = result[f'{name}_ci_high'] - result[f'{name}_ci_low']
+
+        return result
+
+
+class ROCYoudenEstimator:
+    """
+    Level 3+ estimator. For each threshold metric, sweeps candidate values
+    and picks the one that maximises Youden's J = TPR - FPR.
+
+    Convention: 'Good' signals should have metric values BELOW threshold,
+    'Bad' signals should have metric values ABOVE threshold.
+    """
+
+    def __init__(self):
+        self.good_signals: List[dict] = []
+        self.bad_signals: List[dict] = []
+
+    def add_signal(self, signal_data: dict, judgment: str):
+        if judgment == "GOOD":
+            self.good_signals.append(signal_data)
+        elif judgment == "BAD":
+            self.bad_signals.append(signal_data)
+
+    @property
+    def can_estimate(self) -> bool:
+        return len(self.good_signals) >= 5 and len(self.bad_signals) >= 5
+
+    def estimate(self) -> Optional[dict]:
+        if not self.can_estimate:
+            return None
+
+        result = {}
+
+        # Energy ratio
+        good_er = [s['energy_ratio'] for s in self.good_signals]
+        bad_er = [s['energy_ratio'] for s in self.bad_signals]
+        thr, j_stat, auc = self._youden_threshold(good_er, bad_er)
+        result['fft_energy_ratio_threshold'] = thr
+        result['fft_energy_ratio_threshold_j'] = j_stat
+        result['fft_energy_ratio_threshold_auc'] = auc
+
+        # Exceedance ratio
+        good_exc = [s['exceedance_ratio'] for s in self.good_signals]
+        bad_exc = [s['exceedance_ratio'] for s in self.bad_signals]
+        thr, j_stat, auc = self._youden_threshold(good_exc, bad_exc)
+        result['exceedance_ratio_threshold'] = thr
+        result['exceedance_ratio_threshold_j'] = j_stat
+        result['exceedance_ratio_threshold_auc'] = auc
+
+        # Residual threshold (using max absolute residual per signal)
+        good_res = [float(np.max(np.abs(s['residual_physical'])))
+                    for s in self.good_signals]
+        bad_res = [float(np.max(np.abs(s['residual_physical'])))
+                   for s in self.bad_signals]
+        thr, j_stat, auc = self._youden_threshold(good_res, bad_res)
+        result['residual_threshold'] = thr
+        result['residual_threshold_j'] = j_stat
+        result['residual_threshold_auc'] = auc
+
+        return result
+
+    def _youden_threshold(self, good_values: list, bad_values: list
+                          ) -> Tuple[float, float, float]:
+        """Find threshold maximising Youden's J. Returns (threshold, J, AUC)."""
+        all_vals = sorted(set(good_values + bad_values))
+        if len(all_vals) < 2:
+            return all_vals[0] if all_vals else 0.0, 0.0, 0.5
+
+        margin = (all_vals[-1] - all_vals[0]) * 0.05
+        candidates = [all_vals[0] - margin] + all_vals + [all_vals[-1] + margin]
+
+        n_good = len(good_values)
+        n_bad = len(bad_values)
+
+        best_j = -1.0
+        best_thr = candidates[len(candidates) // 2]
+
+        roc_points = []
+
+        for thr in candidates:
+            tp = sum(1 for v in good_values if v <= thr)
+            fp = sum(1 for v in bad_values if v <= thr)
+
+            tpr = tp / n_good if n_good > 0 else 0.0
+            fpr = fp / n_bad if n_bad > 0 else 0.0
+
+            roc_points.append((fpr, tpr))
+
+            j = tpr - fpr
+            if j > best_j:
+                best_j = j
+                best_thr = thr
+
+        # AUC via trapezoidal rule on sorted ROC points
+        roc_points.sort(key=lambda p: (p[0], p[1]))
+        if len(roc_points) >= 2:
+            fprs = [p[0] for p in roc_points]
+            tprs = [p[1] for p in roc_points]
+            auc = float(np.trapz(tprs, fprs))
+            auc = max(0.0, min(1.0, abs(auc)))
+        else:
+            auc = 0.5
+
+        return float(best_thr), float(best_j), auc
+
+
+class HybridCalibrationEngine:
+    """
+    Orchestrates the three sub-estimators and merges their results based
+    on the current confidence level.
+    """
+
+    def __init__(self):
+        self.percentile = PercentileBoundaryEstimator()
+        self.bayesian = BayesianThresholdEstimator()
+        self.roc = ROCYoudenEstimator()
+        self.good_count: int = 0
+        self.bad_count: int = 0
+        self._all_signals: List[dict] = []
+
+    def add_signal(self, signal_data: dict, judgment: str):
+        """Feed a classified signal to all sub-estimators."""
+        if judgment == "GOOD":
+            self.good_count += 1
+        elif judgment == "BAD":
+            self.bad_count += 1
+        else:
+            return  # IGNORE — don't feed to estimators
+
+        # Store a serialisable copy for persistence
+        stored = {k: v for k, v in signal_data.items()
+                  if not isinstance(v, np.ndarray)}
+        for k, v in signal_data.items():
+            if isinstance(v, np.ndarray):
+                stored[k] = v.tolist()
+        stored['judgment'] = judgment
+        stored['timestamp'] = datetime.now().isoformat()
+        self._all_signals.append(stored)
+
+        # Feed to all estimators
+        self.percentile.add_signal(signal_data, judgment)
+        self.bayesian.update(signal_data, judgment)
+        self.roc.add_signal(signal_data, judgment)
+
+    @property
+    def total_signals(self) -> int:
+        return self.good_count + self.bad_count
+
+    @property
+    def meets_minimum(self) -> bool:
+        return self.good_count >= 3 and self.bad_count >= 3
+
+    @property
+    def can_estimate(self) -> bool:
+        return self.meets_minimum
+
+    @property
+    def confidence_level(self) -> int:
+        """0-4 confidence scale."""
+        if not self.meets_minimum:
+            return 0
+        n = self.total_signals
+        if n <= 7:
+            return 1
+        elif n <= 11:
+            return 2
+        elif n <= 15:
+            return 3
+        else:
+            return 4
+
+    def get_estimates(self) -> Optional[dict]:
+        """Return the best merged parameter estimates for the current level."""
+        if not self.can_estimate:
+            return None
+
+        level = self.confidence_level
+
+        # Level 1: Percentile only
+        if level == 1:
+            return self.percentile.estimate()
+
+        # Level 2: Bayesian primary, Percentile fallback
+        if level == 2:
+            bayes = self.bayesian.estimate()
+            perc = self.percentile.estimate()
+            if bayes and perc:
+                return self._merge_two(perc, bayes, bayes_weight=0.6)
+            return perc or bayes
+
+        # Level 3-4: All three, cross-validated
+        perc = self.percentile.estimate()
+        bayes = self.bayesian.estimate()
+        roc = self.roc.estimate()
+        return self._merge_all(perc, bayes, roc, level)
+
+    def _merge_two(self, perc: dict, bayes: dict, bayes_weight: float = 0.6) -> dict:
+        """Weighted average of Percentile and Bayesian estimates."""
+        merged = {}
+        pw = 1.0 - bayes_weight
+
+        threshold_params = [
+            'fft_energy_ratio_threshold',
+            'exceedance_ratio_threshold',
+            'residual_threshold'
+        ]
+
+        for key in threshold_params:
+            p_val = perc.get(key)
+            b_val = bayes.get(key)
+            if p_val is not None and b_val is not None:
+                merged[key] = pw * p_val + bayes_weight * b_val
+            elif p_val is not None:
+                merged[key] = p_val
+            elif b_val is not None:
+                merged[key] = b_val
+
+        # Filter params come from percentile sweep only
+        for key in ('fft_cutoff_frequency', 'lowpass_cutoff'):
+            if key in perc:
+                merged[key] = perc[key]
+
+        # Pass through Bayesian CI metadata
+        for key, val in bayes.items():
+            if '_ci_' in key or '_width' in key:
+                merged[key] = val
+
+        return merged
+
+    def _merge_all(self, perc: Optional[dict], bayes: Optional[dict],
+                   roc: Optional[dict], level: int) -> dict:
+        """Merge all three estimators with cross-validation."""
+        merged = {}
+        agreement_pct = 0.15 if level >= 4 else 0.20
+
+        threshold_params = [
+            'fft_energy_ratio_threshold',
+            'exceedance_ratio_threshold',
+            'residual_threshold'
+        ]
+
+        for key in threshold_params:
+            estimates = []
+            sources = []
+
+            if perc and key in perc and perc[key] is not None:
+                estimates.append(perc[key])
+                sources.append('percentile')
+            if bayes and key in bayes and bayes[key] is not None:
+                estimates.append(bayes[key])
+                sources.append('bayesian')
+            if roc and key in roc and roc[key] is not None:
+                estimates.append(roc[key])
+                sources.append('roc')
+
+            if not estimates:
+                continue
+
+            if len(estimates) == 1:
+                merged[key] = estimates[0]
+            elif len(estimates) == 2:
+                merged[key] = float(np.mean(estimates))
+            else:
+                # Three estimates — check agreement
+                mean_val = np.mean(estimates)
+                if mean_val > 0:
+                    deviations = [abs(e - mean_val) / mean_val for e in estimates]
+                    if all(d < agreement_pct for d in deviations):
+                        merged[key] = float(mean_val)
+                    else:
+                        outlier_idx = int(np.argmax(deviations))
+                        kept = [e for i, e in enumerate(estimates) if i != outlier_idx]
+                        merged[key] = float(np.mean(kept))
+                        logger.info(
+                            f"[CAL] {key}: dropped {sources[outlier_idx]} estimate "
+                            f"({estimates[outlier_idx]:.6f}) as outlier. "
+                            f"Using mean of remaining: {merged[key]:.6f}"
+                        )
+                else:
+                    merged[key] = float(np.mean(estimates))
+
+        # Filter params from percentile
+        if perc:
+            for key in ('fft_cutoff_frequency', 'lowpass_cutoff'):
+                if key in perc:
+                    merged[key] = perc[key]
+
+        # Metadata from Bayesian and ROC
+        if bayes:
+            for key, val in bayes.items():
+                if '_ci_' in key or '_width' in key:
+                    merged[key] = val
+        if roc:
+            for key, val in roc.items():
+                if '_j' in key or '_auc' in key:
+                    merged[key] = val
+
+        return merged
+
+    def to_dict(self) -> dict:
+        """Serialise the engine state for JSON persistence."""
+        return {
+            'good_count': self.good_count,
+            'bad_count': self.bad_count,
+            'confidence_level': self.confidence_level,
+            'total_signals': self.total_signals,
+            'signals': self._all_signals,
+            'method': 'hybrid',
+            'created_at': (self._all_signals[0]['timestamp']
+                          if self._all_signals else ''),
+            'last_updated': (self._all_signals[-1]['timestamp']
+                            if self._all_signals else ''),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'HybridCalibrationEngine':
+        """Reconstruct engine from saved _calibration JSON data."""
+        engine = cls()
+        signals = data.get('signals', [])
+        for sig in signals:
+            judgment = sig.get('judgment', 'IGNORE')
+            sig_copy = dict(sig)
+            for key in ('fft_freqs', 'fft_mags', 'residual_physical', 'signal_physical'):
+                if key in sig_copy and isinstance(sig_copy[key], list):
+                    sig_copy[key] = np.array(sig_copy[key])
+            engine.add_signal(sig_copy, judgment)
+        return engine
+
+# ---------------------------------------------------------------------------
 
 @dataclass
 class CoherenceAnalysisResult:
@@ -3663,7 +4249,7 @@ class MonitorControlGUI:
     def __init__(self, root, config_path=None, calibration_mode: bool = False):
         self.root = root
         self.calibration_mode = calibration_mode
-        self.root.title("USMA v0.9.0 - Calibration Wizard Release")
+        self.root.title("USMA v0.9.1 - Calibration Engine Release")
         self.root.geometry("1000x750")
 
         # Use provided config path or default
@@ -3696,7 +4282,24 @@ class MonitorControlGUI:
         self.log_to_unv = tk.BooleanVar(value=False)
         
         self.monitor = ScreenMonitor(self.config_path.get(), self.update_feedback_panel, self._on_plot_data)
-        
+
+        # Initialise calibration engine
+        self.calibration_engine = HybridCalibrationEngine()
+
+        # If config has saved calibration data, reconstruct the engine from it
+        if config_path:
+            try:
+                with open(config_path, 'r') as f:
+                    config_data = json.load(f)
+                cal_data = config_data.get('_calibration')
+                if cal_data and isinstance(cal_data, dict) and cal_data.get('signals'):
+                    self.calibration_engine = HybridCalibrationEngine.from_dict(cal_data)
+                    level = self.calibration_engine.confidence_level
+                    total = self.calibration_engine.total_signals
+                    logger.info(f"[CAL] Loaded calibration data: {total} signals, Level {level}")
+            except (json.JSONDecodeError, IOError, KeyError) as e:
+                logger.warning(f"[CAL] Could not load calibration data: {e}")
+
         self.manual_points_vars = {
             'run': tk.StringVar(value='Run 1'),
             'hammer_point': tk.StringVar(value='P1'),
@@ -3711,6 +4314,15 @@ class MonitorControlGUI:
         self.overlay = None
         self._setup_main_gui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+        # Apply loaded calibration estimates now that GUI is set up
+        if self.calibration_engine.can_estimate:
+            estimates = self.calibration_engine.get_estimates()
+            if estimates:
+                self._apply_calibrated_params(estimates)
+                level = self.calibration_engine.confidence_level
+                total = self.calibration_engine.total_signals
+                self._update_calibration_status(level, total)
     
     def _setup_main_gui(self):
         # Create main container with scrollbars
@@ -4223,7 +4835,7 @@ class MonitorControlGUI:
         self.cal_status_label.config(text=f"[{sig_type}] Signal received — classify it now")
 
     def _cal_classify(self, judgment: str):
-        """Handle Good/Bad/Ignore button click."""
+        """Handle Good/Bad/Ignore button click during calibration."""
         if self.cal_pending_signal is None:
             return
 
@@ -4235,58 +4847,272 @@ class MonitorControlGUI:
         self.cal_bad_btn.config(state=tk.DISABLED)
         self.cal_ignore_btn.config(state=tk.DISABLED)
 
-        if judgment == "good":
-            self.cal_good_count += 1
-            logger.info(f"[CAL] Signal {sig.hit_key} classified as GOOD ({self.cal_good_count} total)")
-        elif judgment == "bad":
-            self.cal_bad_count += 1
-            logger.info(f"[CAL] Signal {sig.hit_key} classified as BAD ({self.cal_bad_count} total)")
+        judgment_upper = judgment.upper()
+
+        if judgment_upper in ("GOOD", "BAD"):
+            # Check signal similarity before adding
+            is_similar, similar_idx = self._check_signal_similarity(sig)
+            if is_similar:
+                answer = messagebox.askyesno(
+                    "Similar Signal Detected",
+                    f"This signal is very similar to calibration signal #{similar_idx + 1}.\n\n"
+                    "For best results, use hits from different locations or conditions.\n"
+                    "Classify anyway?",
+                    parent=self.root
+                )
+                if not answer:
+                    self.cal_status_label.config(text="Signal skipped (too similar) — waiting...")
+                    return
+
+            # Build signal data dict from LightweightHitData
+            signal_data = {
+                'signal_physical': sig.signal_physical,
+                'fft_freqs': sig.fft_freqs,
+                'fft_mags': sig.fft_mags,
+                'residual_physical': sig.residual_physical,
+                'energy_ratio': sig.energy_ratio,
+                'exceedance_ratio': sig.exceedance_ratio,
+                'exceedance_count': sig.exceedance_count,
+                'total_energy': sig.total_energy,
+                'high_freq_energy': sig.high_freq_energy,
+                'roi_name': sig.hit_key,
+                'signal_type': sig.signal_type,
+                'source': 'calibration_phase',
+            }
+
+            # Feed to calibration engine
+            self.calibration_engine.add_signal(signal_data, judgment_upper)
+
+            if judgment_upper == "GOOD":
+                self.cal_good_count += 1
+                logger.info(f"[CAL] Signal {sig.hit_key} classified as GOOD "
+                            f"(E.Ratio={sig.energy_ratio:.4f}, "
+                            f"Exc.Ratio={sig.exceedance_ratio:.2f}) "
+                            f"[{self.cal_good_count}G total]")
+            else:
+                self.cal_bad_count += 1
+                logger.info(f"[CAL] Signal {sig.hit_key} classified as BAD "
+                            f"(E.Ratio={sig.energy_ratio:.4f}, "
+                            f"Exc.Ratio={sig.exceedance_ratio:.2f}) "
+                            f"[{self.cal_bad_count}B total]")
         else:
             logger.info(f"[CAL] Signal {sig.hit_key} IGNORED")
 
         total = self.cal_good_count + self.cal_bad_count
+
+        # Update counter label
         self.cal_counter_label.config(
             text=f"Signals: {self.cal_good_count} Good, {self.cal_bad_count} Bad"
-                 f" {'(need 3+3 minimum)' if self.cal_good_count < 3 or self.cal_bad_count < 3 else '(ready)'}"
+                 f" {'(need 3+3 minimum)' if not self.calibration_engine.meets_minimum else '(ready)'}"
         )
 
-        # Update calibration status bar level
-        if total == 0:
-            level = 0
-        elif total < 6 or self.cal_good_count < 3 or self.cal_bad_count < 3:
-            level = 1
-        elif total < 12:
-            level = 2
-        elif total < 20:
-            level = 3
-        else:
-            level = 4
+        # Update status bar from engine's actual confidence level
+        level = self.calibration_engine.confidence_level
         self._update_calibration_status(level, total)
 
-        self.cal_status_label.config(text=f"Classified as {judgment.upper()} — waiting for next signal...")
-
-        # Enable Finish button once minimum signals reached
-        if self.cal_good_count >= 3 and self.cal_bad_count >= 3:
+        # If we can estimate, compute and display parameters
+        if self.calibration_engine.can_estimate:
+            estimates = self.calibration_engine.get_estimates()
+            if estimates:
+                self._apply_calibrated_params(estimates)
+                self.cal_status_label.config(
+                    text=f"Level {level} — Parameters updated from {total} signals"
+                )
             self.cal_finish_btn.config(state=tk.NORMAL)
+        else:
+            need_good = max(0, 3 - self.cal_good_count)
+            need_bad = max(0, 3 - self.cal_bad_count)
+            parts = []
+            if need_good > 0:
+                parts.append(f"{need_good} more Good")
+            if need_bad > 0:
+                parts.append(f"{need_bad} more Bad")
+            if parts:
+                self.cal_status_label.config(
+                    text=f"Need {' and '.join(parts)} signal(s)"
+                )
+            else:
+                self.cal_status_label.config(
+                    text=f"Classified as {judgment_upper} — waiting for next signal..."
+                )
+
+    def _apply_calibrated_params(self, estimates: dict):
+        """Apply estimated parameters to app_config and update GUI display."""
+        cfg = self.monitor.app_config
+
+        param_map = {
+            'fft_energy_ratio_threshold': 'fft_energy_ratio_threshold',
+            'exceedance_ratio_threshold': 'exceedance_ratio_threshold',
+            'residual_threshold': 'residual_threshold',
+            'fft_cutoff_frequency': 'fft_cutoff_frequency',
+            'lowpass_cutoff': 'lowpass_cutoff',
+        }
+
+        applied = {}
+        for est_key, cfg_attr in param_map.items():
+            if est_key in estimates and estimates[est_key] is not None:
+                val = estimates[est_key]
+                setattr(cfg, cfg_attr, val)
+                applied[est_key] = val
+                # Also update PSD parameters (same calibration applies)
+                psd_attr = f'psd_{cfg_attr}'
+                if hasattr(cfg, psd_attr):
+                    setattr(cfg, psd_attr, val)
+
+        # Update GUI spinbox variables if they exist
+        if hasattr(self, 'param_vars'):
+            for key, val in applied.items():
+                if key in self.param_vars:
+                    try:
+                        self.param_vars[key].set(round(val, 6))
+                    except Exception:
+                        pass
+
+        if applied:
+            logger.info(f"[CAL] Applied calibrated parameters: "
+                        + ", ".join(f"{k}={v:.6f}" for k, v in applied.items()))
+
+    def _save_calibration_to_config(self):
+        """Persist calibration data to the config JSON file."""
+        config_path = self.config_path.get()
+        if not config_path or not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+            config_data['_calibration'] = self.calibration_engine.to_dict()
+            # Also update _metadata with calibrated threshold values
+            meta = config_data.get('_metadata', {})
+            estimates = self.calibration_engine.get_estimates()
+            if estimates:
+                for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
+                            'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                    if key in estimates:
+                        meta[key] = estimates[key]
+                        psd_key = f'psd_{key}'
+                        if psd_key in meta or psd_key.replace('psd_', '') in meta:
+                            meta[psd_key] = estimates[key]
+            config_data['_metadata'] = meta
+            with open(config_path, 'w') as f:
+                json.dump(config_data, f, indent=2)
+            logger.info(f"[CAL] Saved calibration data to {config_path}")
+        except Exception as e:
+            logger.error(f"[CAL] Failed to save calibration data: {e}")
+
+    def _check_signal_similarity(self, new_signal: 'LightweightHitData') -> Tuple[bool, Optional[int]]:
+        """Check if new signal is too similar to an already-classified signal."""
+        if not hasattr(self, 'calibration_engine'):
+            return False, None
+
+        stored = self.calibration_engine._all_signals
+        if not stored:
+            return False, None
+
+        new_phys = new_signal.signal_physical
+        new_fft = new_signal.fft_mags
+
+        for i, old in enumerate(stored):
+            old_phys = old.get('signal_physical')
+            old_fft = old.get('fft_mags')
+
+            if old_phys is None or old_fft is None:
+                continue
+
+            if isinstance(old_phys, list):
+                old_phys = np.array(old_phys)
+            if isinstance(old_fft, list):
+                old_fft = np.array(old_fft)
+
+            if len(new_phys) != len(old_phys) or len(new_fft) != len(old_fft):
+                continue
+
+            # Normalised cross-correlation
+            try:
+                ncc = float(np.corrcoef(new_phys, old_phys)[0, 1])
+            except Exception:
+                ncc = 0.0
+
+            # Cosine similarity of FFT spectra
+            norm_new = np.linalg.norm(new_fft)
+            norm_old = np.linalg.norm(old_fft)
+            if norm_new > 1e-12 and norm_old > 1e-12:
+                cos_sim = float(np.dot(new_fft, old_fft) / (norm_new * norm_old))
+            else:
+                cos_sim = 0.0
+
+            if ncc > 0.95 and cos_sim > 0.95:
+                return True, i
+
+        return False, None
 
     def _finish_calibration(self):
-        """Transition from calibration mode to normal monitoring with editable params."""
-        logger.info(f"[CAL] Calibration finished: {self.cal_good_count} good, {self.cal_bad_count} bad signals")
+        """Transition from calibration to normal monitoring with calibrated params."""
+        engine = self.calibration_engine
+        level = engine.confidence_level
+        total = engine.total_signals
 
-        # Destroy the calibration panel
+        logger.info(f"[CAL] Finishing calibration: {engine.good_count}G + "
+                    f"{engine.bad_count}B = {total} signals, Level {level}")
+
+        # Compute final estimates
+        estimates = engine.get_estimates()
+
+        if estimates:
+            # Apply to config
+            self._apply_calibrated_params(estimates)
+
+            # Log the final parameter values
+            logger.info("[CAL] Final calibrated parameters:")
+            for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
+                        'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                if key in estimates:
+                    logger.info(f"  {key} = {estimates[key]:.6f}")
+
+            # Show summary to user
+            summary_lines = [
+                f"Calibration complete — Level {level} ({total} signals)\n",
+                "Estimated parameters:"
+            ]
+            for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
+                        'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                if key in estimates:
+                    default_val = {
+                        'fft_energy_ratio_threshold': 0.006,
+                        'exceedance_ratio_threshold': 0.7,
+                        'residual_threshold': 0.005,
+                        'fft_cutoff_frequency': 0.07,
+                        'lowpass_cutoff': 0.07,
+                    }.get(key, 0)
+                    summary_lines.append(
+                        f"  {key}: {estimates[key]:.6f}  (was {default_val})"
+                    )
+
+            messagebox.showinfo("Calibration Complete", "\n".join(summary_lines))
+        else:
+            messagebox.showwarning(
+                "Calibration Incomplete",
+                f"Could not compute parameters from {total} signals.\n"
+                "Falling back to default values."
+            )
+
+        # Save calibration data to config file
+        self._save_calibration_to_config()
+
+        # Destroy calibration panel
         if hasattr(self, 'cal_frame') and self.cal_frame.winfo_exists():
             self.cal_frame.destroy()
 
         # Exit calibration mode
         self.calibration_mode = False
 
-        # Create the standard analysis parameters panel
+        # Create standard analysis parameters panel (pre-filled with calibrated values)
         self._setup_analysis_params(self.right_panel)
-
-        # Sync the param UI from current config values (which may have been updated by calibration)
         self._sync_param_ui_from_config()
 
-        logger.info("[CAL] Switched to normal monitoring mode with editable parameters")
+        # Update calibration status bar to show achieved level
+        self._update_calibration_status(level, total)
+
+        logger.info("[CAL] Switched to normal monitoring mode with calibrated parameters")
 
     def _sync_param_ui_from_config(self):
         """Sync parameter UI variables from the current app_config values."""
@@ -4434,6 +5260,9 @@ class MonitorControlGUI:
     def _on_closing(self):
         if self.is_monitoring.get():
             self.monitor.stop()
+        # Save calibration data if any signals were collected
+        if self.calibration_engine.total_signals > 0:
+            self._save_calibration_to_config()
         if self.overlay and self.overlay.winfo_exists():
             self.overlay.destroy()
         self.root.destroy()

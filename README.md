@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.9.0
+# USMA (Unified Screen Monitoring Application) — v0.9.1
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
@@ -84,6 +84,77 @@ Dual-method classification (FRF / PSD):
 
 ---
 
+## Calibration System (v0.9.1+)
+
+USMA includes an expert-guided calibration system that automatically tunes
+classification thresholds to match your specific test setup. Instead of relying
+on hardcoded defaults, the system learns from your Good/Bad judgments during
+an initial calibration phase.
+
+### How It Works
+
+1. **Start calibration:** When loading a config, choose "Calibrate with Expert Feedback"
+2. **Classify signals:** As hits are detected, click Good, Bad, or Skip for each one
+3. **Automatic threshold computation:** After 6+ signals (3 Good + 3 Bad minimum),
+   the system computes optimised thresholds using a hybrid statistical approach
+4. **Finish & monitor:** Click "Finish Calibration" to switch to normal monitoring
+   with your calibrated parameters
+
+### Statistical Methods
+
+The calibration uses three complementary estimation methods that activate
+progressively as more data is collected:
+
+- **Level 1 (6-7 signals):** Percentile Boundary estimation — places thresholds
+  at the midpoint between Good and Bad distributions, or at the 95th percentile
+  of the Good distribution when distributions overlap
+- **Level 2 (8-11 signals):** Adds Bayesian grid-based posterior estimation with
+  sigmoid likelihoods, providing credible intervals for each parameter
+- **Level 3+ (12+ signals):** Adds ROC/Youden J-statistic optimisation and
+  cross-validates across all three methods, dropping outlier estimates
+
+### Confidence Scale
+
+The calibration status bar shows your current confidence level:
+
+| Level | Color | Signals | Meaning |
+|-------|-------|---------|---------|
+| 0 | Red | <6 | Not calibrated — using defaults |
+| 1 | Orange | 6-7 | Preliminary — rough estimates |
+| 2 | Yellow | 8-11 | Basic — Bayesian converging |
+| 3 | Blue | 12-15 | Solid — cross-validated |
+| 4 | Green | 16+ | Robust — high confidence |
+
+### Parameters Tuned
+
+The calibration system optimises these parameters for both FRF and PSD analysis:
+
+- **FFT cutoff frequency** — boundary between low and high frequency energy
+- **FFT energy ratio threshold** — maximum acceptable high-frequency energy proportion
+- **Lowpass cutoff frequency** — Butterworth filter cutoff for residual analysis
+- **Residual threshold** — amplitude threshold for exceedance counting
+- **Exceedance ratio threshold** — maximum fraction of samples exceeding residual threshold
+
+### Calibration Persistence
+
+Calibration data is saved inside the config JSON file under the `_calibration` key.
+This means:
+- Calibration persists across sessions — load a calibrated config to use its thresholds
+- Additional signals can be added later to improve confidence
+- If the estimation algorithm improves in future versions, old data can be re-processed
+
+### Tips for Good Calibration
+
+- Use signals from different impact points — the similarity detector will warn
+  if signals are too alike
+- Include a mix of clearly good and clearly bad hits — borderline signals are
+  less informative
+- Aim for at least 12 signals (Level 3) for reliable results
+- After calibration, you can fine-tune parameters manually in the Analysis
+  Parameters panel
+
+---
+
 ## Troubleshooting
 
 | Error | Solution |
@@ -97,7 +168,16 @@ Dual-method classification (FRF / PSD):
 
 ## Version History
 
-### v0.9.0 — Calibration Wizard Release *(current)*
+### v0.9.1 — Calibration Engine Release *(current)*
+
+- **HybridCalibrationEngine** — three-method statistical engine: Percentile Boundary, Bayesian Grid Posterior, ROC/Youden J-statistic
+- **Automatic parameter estimation** — calibrated thresholds applied after each classified signal (6+ signals required)
+- **5-level progressive confidence** — methods activate as data accumulates (Percentile → Bayesian → ROC cross-validation)
+- **Calibration persistence** — engine state saved to config JSON `_calibration` section; reloaded on next launch
+- **Signal similarity detection** — NCC + FFT cosine similarity warns when calibration signals are too alike
+- **Cross-validation with outlier rejection** — at Level 3+, estimator disagreements resolved by dropping outliers
+
+### v0.9.0 — Calibration Wizard Release
 
 - **CalibrationChoiceDialog** — post-config dialog: "Use Default Parameters" or "Calibrate with Expert Feedback"
 - **Calibration Mode UI** — Good/Bad/Ignore buttons activate on signal detection; signal counter with 5-level status bar
