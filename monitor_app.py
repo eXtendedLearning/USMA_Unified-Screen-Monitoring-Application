@@ -17,12 +17,23 @@ except OSError:
 # ===========================================================
 
 """
-USMA (Unified Screen Monitoring Application) - v0.9.1 (Calibration Engine Release)
+USMA (Unified Screen Monitoring Application) - v0.9.2 (UI Polish & Classification Controls)
 
 A professional-grade GUI application for real-time screen monitoring, signal
 analysis, and OCR designed for modal analysis workflows. Captures screen regions,
 reconstructs FRF/PSD/Coherence signals, performs dual-method quality classification
 (FFT + Lowpass), and exports data in industry-standard formats (UNV Dataset 58).
+
+Changes in v0.9.2:
+- Coherence decoupled from calibration and classification (informational only)
+- Dual FRF/PSD analysis parameter panels with independent manual tuning
+- Fixed spinbox display widths and arrow button ranges
+- Four classification method indicator lights (FRF-FFT, FRF-LP, PSD-FFT, PSD-LP)
+- Per-method enable/disable toggle (click light to deactivate a method)
+- Resizable graph/console panels via draggable sash (PanedWindow)
+- Clear Calibration button to reset calibration data while keeping ROI config
+- Live calibration Good/Bad buttons in Analysis Parameters for continued calibration
+- Portable launcher version extraction from line 20 of monitor_app.py
 
 Key Features (v0.9.1):
 - Calibration Engine: HybridCalibrationEngine with three statistical methods
@@ -75,7 +86,7 @@ import gc
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from dataclasses import dataclass, asdict, field
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any, Callable, get_type_hints, cast
 from contextlib import contextmanager
 from PIL import Image, ImageTk
 from scipy.fft import rfft, rfftfreq
@@ -95,6 +106,9 @@ try:
 except (ImportError, OSError) as e:
     SOUND_DEVICE_AVAILABLE = False
     print(f"Warning: sounddevice library not found or audio device error: {e}. Audio feedback disabled.")
+
+# --- Version Configuration ---
+APP_VERSION = "0.9.2"
 
 # --- OCR Configuration ---
 try:
@@ -213,6 +227,7 @@ class DataLogOptions:
 @dataclass
 class PointsInfo:
     """Stores parsed measurement point metadata."""
+    VERSION: str = field(default_factory=lambda: APP_VERSION)
     run: str = "Run 1"
     hammer_point: str = "P1"
     hammer_dir: str = "-Z"
@@ -240,7 +255,7 @@ class MonitoringRegion:
     y_scale_type: str = field(default="linear")  # "linear", "dB", "log", "ln" — metadata for display
     overlay_color: str = field(default="")  # Custom overlay color (hex). Empty = use type default.
 
-@dataclass
+@dataclass(slots=True)
 class FRFAnalysisResult:
     """Extended to include lowpass residual analysis results in physical units."""
     is_high_frequency: bool
@@ -260,7 +275,7 @@ class FRFAnalysisResult:
     lowpass_is_bad_hit: bool = False
     y_axis_unit: str = "g/N"
 
-@dataclass
+@dataclass(slots=True)
 class LightweightHitData:
     """Lightweight version of hit data for history storage - avoids memory bloat."""
     signal_physical: np.ndarray
@@ -517,10 +532,12 @@ class BayesianThresholdEstimator:
 
             if judgment == "GOOD":
                 # Good signal: threshold should be ABOVE the observed value
-                likelihood = 1.0 / (1.0 + np.exp(-steepness * (grid - observed)))
+                exponent = np.clip(-steepness * (grid - observed), -500, 500)
+                likelihood = 1.0 / (1.0 + np.exp(exponent))
             else:
                 # Bad signal: threshold should be BELOW the observed value
-                likelihood = 1.0 / (1.0 + np.exp(-steepness * (observed - grid)))
+                exponent = np.clip(-steepness * (observed - grid), -500, 500)
+                likelihood = 1.0 / (1.0 + np.exp(exponent))
 
             # Avoid zeros
             likelihood = np.clip(likelihood, 1e-10, 1.0)
@@ -755,9 +772,9 @@ class HybridCalibrationEngine:
         roc = self.roc.estimate()
         return self._merge_all(perc, bayes, roc, level)
 
-    def _merge_two(self, perc: dict, bayes: dict, bayes_weight: float = 0.6) -> dict:
+    def _merge_two(self, perc: Dict[str, Any], bayes: Dict[str, Any], bayes_weight: float = 0.6) -> Dict[str, Any]:
         """Weighted average of Percentile and Bayesian estimates."""
-        merged = {}
+        merged: Dict[str, Any] = {}
         pw = 1.0 - bayes_weight
 
         threshold_params = [
@@ -788,10 +805,10 @@ class HybridCalibrationEngine:
 
         return merged
 
-    def _merge_all(self, perc: Optional[dict], bayes: Optional[dict],
-                   roc: Optional[dict], level: int) -> dict:
+    def _merge_all(self, perc: Optional[Dict[str, Any]], bayes: Optional[Dict[str, Any]],
+                   roc: Optional[Dict[str, Any]], level: int) -> Dict[str, Any]:
         """Merge all three estimators with cross-validation."""
-        merged = {}
+        merged: Dict[str, Any] = {}
         agreement_pct = 0.15 if level >= 4 else 0.20
 
         threshold_params = [
@@ -800,18 +817,22 @@ class HybridCalibrationEngine:
             'residual_threshold'
         ]
 
+        p_dict = perc if perc is not None else {}
+        b_dict = bayes if bayes is not None else {}
+        r_dict = roc if roc is not None else {}
+
         for key in threshold_params:
             estimates = []
             sources = []
 
-            if perc and key in perc and perc[key] is not None:
-                estimates.append(perc[key])
+            if key in p_dict and p_dict[key] is not None:
+                estimates.append(p_dict[key])
                 sources.append('percentile')
-            if bayes and key in bayes and bayes[key] is not None:
-                estimates.append(bayes[key])
+            if key in b_dict and b_dict[key] is not None:
+                estimates.append(b_dict[key])
                 sources.append('bayesian')
-            if roc and key in roc and roc[key] is not None:
-                estimates.append(roc[key])
+            if key in r_dict and r_dict[key] is not None:
+                estimates.append(r_dict[key])
                 sources.append('roc')
 
             if not estimates:
@@ -841,20 +862,17 @@ class HybridCalibrationEngine:
                     merged[key] = float(np.mean(estimates))
 
         # Filter params from percentile
-        if perc:
-            for key in ('fft_cutoff_frequency', 'lowpass_cutoff'):
-                if key in perc:
-                    merged[key] = perc[key]
+        for key in ('fft_cutoff_frequency', 'lowpass_cutoff'):
+            if key in p_dict:
+                merged[key] = p_dict[key]
 
         # Metadata from Bayesian and ROC
-        if bayes:
-            for key, val in bayes.items():
-                if '_ci_' in key or '_width' in key:
-                    merged[key] = val
-        if roc:
-            for key, val in roc.items():
-                if '_j' in key or '_auc' in key:
-                    merged[key] = val
+        for key, val in b_dict.items():
+            if '_ci_' in key or '_width' in key:
+                merged[key] = val
+        for key, val in r_dict.items():
+            if '_j' in key or '_auc' in key:
+                merged[key] = val
 
         return merged
 
@@ -889,7 +907,7 @@ class HybridCalibrationEngine:
 
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class CoherenceAnalysisResult:
     """Result of coherence analysis for a single captured snapshot."""
     signal_physical: np.ndarray          # Raw coherence values (0 to 1)
@@ -911,7 +929,7 @@ class CoherenceTrackingState:
     snapshots: List[CoherenceAnalysisResult] = field(default_factory=list)
     trend: str = "UNKNOWN"  # "IMPROVING", "STABLE", "DEGRADING", "INSUFFICIENT_DATA"
 
-@dataclass
+@dataclass(slots=True)
 class LightweightCoherenceData:
     """Lightweight copy of coherence data for the graph viewer (avoids memory bloat)."""
     signal_physical: np.ndarray
@@ -924,7 +942,7 @@ class LightweightCoherenceData:
 
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class FrameAnalysisResult:
     """Holds all analysis results from a single captured frame."""
     frf_results: Dict[str, FRFAnalysisResult] = field(default_factory=dict)
@@ -973,6 +991,61 @@ class AppConfig:
     coherence_threshold: float = 0.3          # Normalized badness threshold
     coherence_degradation_pct: float = 0.20   # % increase in badness to flag degradation
     hits_per_run: int = 5                     # Expected number of hits per run
+    monitor_index: int = 1                    # mss monitor index: 0=all, 1=primary, 2+=secondary
+
+    @classmethod
+    def from_json(cls, path: str) -> 'AppConfig':
+        """Load an AppConfig from a JSON config file.
+
+        This is a standalone loader that does NOT require instantiating ScreenMonitor.
+        """
+        try:
+            if not os.path.exists(path):
+                logger.warning(f"Config file does not exist: {path}")
+                return cls()
+
+            with open(path, 'r') as f:
+                config_data = json.load(f)
+
+            config = cls()
+            metadata = config_data.get('_metadata', {})
+
+            config.hsv_lower = metadata.get('hsv_lower', config.hsv_lower)
+            config.hsv_upper = metadata.get('hsv_upper', config.hsv_upper)
+            config.screenshot_interval = metadata.get('screenshot_interval', config.screenshot_interval)
+            config.fft_cutoff_frequency = metadata.get('fft_cutoff_frequency', config.fft_cutoff_frequency)
+            config.fft_energy_ratio_threshold = metadata.get('fft_energy_ratio_threshold', config.fft_energy_ratio_threshold)
+            config.lowpass_cutoff = metadata.get('lowpass_cutoff', config.lowpass_cutoff)
+            config.lowpass_filter_order = metadata.get('lowpass_filter_order', config.lowpass_filter_order)
+            config.residual_threshold = metadata.get('residual_threshold', config.residual_threshold)
+            config.exceedance_ratio_threshold = metadata.get('exceedance_ratio_threshold', config.exceedance_ratio_threshold)
+            config.psd_fft_cutoff_frequency = metadata.get('psd_fft_cutoff_frequency', config.psd_fft_cutoff_frequency)
+            config.psd_fft_energy_ratio_threshold = metadata.get('psd_fft_energy_ratio_threshold', config.psd_fft_energy_ratio_threshold)
+            config.psd_lowpass_cutoff = metadata.get('psd_lowpass_cutoff', config.psd_lowpass_cutoff)
+            config.psd_lowpass_filter_order = metadata.get('psd_lowpass_filter_order', config.psd_lowpass_filter_order)
+            config.psd_residual_threshold = metadata.get('psd_residual_threshold', config.psd_residual_threshold)
+            config.psd_exceedance_ratio_threshold = metadata.get('psd_exceedance_ratio_threshold', config.psd_exceedance_ratio_threshold)
+            config.coherence_threshold = metadata.get('coherence_threshold', config.coherence_threshold)
+            config.coherence_degradation_pct = metadata.get('coherence_degradation_pct', config.coherence_degradation_pct)
+            config.hits_per_run = metadata.get('hits_per_run', config.hits_per_run)
+            config.monitor_index = metadata.get('monitor_index', config.monitor_index)
+
+            region_fields = get_type_hints(MonitoringRegion).keys()
+            for name, data in config_data.items():
+                if not name.startswith('_') and isinstance(data, dict):
+                    filtered_data = {k: v for k, v in data.items() if k in region_fields}
+                    if 'name' in filtered_data:
+                        config.regions[name] = MonitoringRegion(**filtered_data)
+
+            logger.info(f"Config loaded from {path}: {len(config.regions)} regions, "
+                         f"HSV [{config.hsv_lower}]-[{config.hsv_upper}]")
+            return config
+
+        except Exception as e:
+            logger.error(f"Failed to load config from {path}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return cls()
 
 
 @contextmanager
@@ -1010,13 +1083,18 @@ def styled_figure(figsize=(10, 5), dpi=150):
             del fig
 
 
+def load_app_config(path: str) -> AppConfig:
+    """Load an AppConfig from a JSON config file. Delegates to AppConfig.from_json."""
+    return AppConfig.from_json(path)
+
+
 # --- 3. CORE LOGIC: THE SCREEN MONITOR ENGINE ---
 class ScreenMonitor:
     """Handles the core task of capturing and analyzing the screen."""
     
     def __init__(self, config_path, update_callback=None, plot_callback=None):
         self.running = False
-        self.thread = None
+        self.thread: Optional[threading.Thread] = None
         self.config_path = config_path
         self.app_config = self._load_config(self.config_path)
         self.update_callback = update_callback
@@ -1056,8 +1134,16 @@ class ScreenMonitor:
 
         # OCR caching: only re-run OCR when ROI content changes significantly
         self._ocr_cache: Dict[str, Any] = {}  # region_name -> last OCR result
-        self._ocr_roi_hash: Dict[str, float] = {}  # region_name -> last ROI hash
-        self._ocr_change_threshold: float = 5.0  # mean pixel difference to trigger re-OCR
+        self._ocr_roi_hash: Dict[str, Any] = {}  # region_name -> (mean, std, spatial_signature)
+        self._ocr_change_threshold: float = 3.0  # pixel difference to trigger re-OCR
+
+        # Figure cleanup: batch gc.collect instead of per-figure
+        self._figure_count: int = 0
+        self._gc_every_n_figures: int = 5  # Run GC every N figures instead of every figure
+
+        # Error tracking for exponential backoff
+        self._consecutive_errors: int = 0
+        self._max_consecutive_errors: int = 20  # Auto-stop after this many
 
     def _capture_screen(self) -> np.ndarray:
         """
@@ -1066,8 +1152,13 @@ class ScreenMonitor:
         """
         if MSS_AVAILABLE:
             with mss.mss() as sct:
-                # Capture primary monitor
-                monitor = sct.monitors[2]  # 1 = primary monitor (0 = all monitors combined)
+                idx = self.app_config.monitor_index
+                if idx >= len(sct.monitors):
+                    idx = 1  # Fall back to primary monitor
+                    logger.warning(f"Monitor index {self.app_config.monitor_index} not available, "
+                                 f"falling back to primary (index 1). "
+                                 f"Available monitors: {len(sct.monitors) - 1}")
+                monitor = sct.monitors[idx]
                 screenshot = sct.grab(monitor)
                 # mss returns BGRA format - use proper OpenCV conversion
                 # This is more reliable than just slicing [:, :, :3]
@@ -1102,16 +1193,19 @@ class ScreenMonitor:
         self.running = True
         self.last_known_status = "Unknown"
         self.last_known_overload = "Unknown"
-        self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
-        self.thread.start()
-        logger.info("Screen monitoring thread started for USMA v0.9.0")
+        t = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self.thread = t
+        t.start()
+        logger.info(f"Screen monitoring thread started for USMA v{APP_VERSION}")
         return True
 
     def stop(self):
         self.running = False
         self._stop_audio_feedback()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=1.5)
+        t = self.thread
+        if t is not None and t.is_alive():
+            t.join(timeout=1.5)
+        gc.collect()
         logger.info("Screen monitoring stopped.")
 
     def update_config(self, new_config_path):
@@ -1125,74 +1219,17 @@ class ScreenMonitor:
             self._stop_audio_feedback()
 
     def _load_config(self, path: str) -> AppConfig:
-        try:
-            logger.info(f"Loading config from: {path}")
-            if not os.path.exists(path):
-                logger.warning(f"Config file does not exist: {path}")
-                return AppConfig()
-            
-            with open(path, 'r') as f:
-                config_data = json.load(f)
-            
-            config = AppConfig()
-            metadata = config_data.get('_metadata', {})
-            
-            # Debug: Log what we found in metadata
-            logger.info(f"Config _metadata keys: {list(metadata.keys()) if metadata else 'NONE'}")
-            if 'hsv_lower' in metadata:
-                logger.info(f"  Found hsv_lower in config: {metadata['hsv_lower']}")
-            else:
-                logger.warning(f"  hsv_lower NOT FOUND in config _metadata - using defaults")
-            if 'hsv_upper' in metadata:
-                logger.info(f"  Found hsv_upper in config: {metadata['hsv_upper']}")
-            else:
-                logger.warning(f"  hsv_upper NOT FOUND in config _metadata - using defaults")
-            
-            config.hsv_lower = metadata.get('hsv_lower', config.hsv_lower)
-            config.hsv_upper = metadata.get('hsv_upper', config.hsv_upper)
-            config.screenshot_interval = metadata.get('screenshot_interval', config.screenshot_interval)
-            config.fft_cutoff_frequency = metadata.get('fft_cutoff_frequency', config.fft_cutoff_frequency)
-            config.fft_energy_ratio_threshold = metadata.get('fft_energy_ratio_threshold', config.fft_energy_ratio_threshold)
-            config.lowpass_cutoff = metadata.get('lowpass_cutoff', config.lowpass_cutoff)
-            config.lowpass_filter_order = metadata.get('lowpass_filter_order', config.lowpass_filter_order)
-            config.residual_threshold = metadata.get('residual_threshold', config.residual_threshold)
-            config.exceedance_ratio_threshold = metadata.get('exceedance_ratio_threshold', config.exceedance_ratio_threshold)
-            # --- New v0.6.0 fields (backward-compatible: all have dataclass defaults) ---
-            config.psd_fft_cutoff_frequency = metadata.get('psd_fft_cutoff_frequency', config.psd_fft_cutoff_frequency)
-            config.psd_fft_energy_ratio_threshold = metadata.get('psd_fft_energy_ratio_threshold', config.psd_fft_energy_ratio_threshold)
-            config.psd_lowpass_cutoff = metadata.get('psd_lowpass_cutoff', config.psd_lowpass_cutoff)
-            config.psd_lowpass_filter_order = metadata.get('psd_lowpass_filter_order', config.psd_lowpass_filter_order)
-            config.psd_residual_threshold = metadata.get('psd_residual_threshold', config.psd_residual_threshold)
-            config.psd_exceedance_ratio_threshold = metadata.get('psd_exceedance_ratio_threshold', config.psd_exceedance_ratio_threshold)
-            config.coherence_threshold = metadata.get('coherence_threshold', config.coherence_threshold)
-            config.coherence_degradation_pct = metadata.get('coherence_degradation_pct', config.coherence_degradation_pct)
-            config.hits_per_run = metadata.get('hits_per_run', config.hits_per_run)
-            
-            logger.info(f"Config loaded - HSV Lower: {config.hsv_lower}, HSV Upper: {config.hsv_upper}")
-            
-            region_fields = MonitoringRegion.__annotations__.keys()
-            for name, data in config_data.items():
-                if not name.startswith('_') and isinstance(data, dict):
-                    filtered_data = {k: v for k, v in data.items() if k in region_fields}
-                    if 'name' in filtered_data:
-                        config.regions[name] = MonitoringRegion(**filtered_data)
-            
-            logger.info(f"Config regions loaded: {list(config.regions.keys())}")
-            return config
-        except Exception as e:
-            logger.error(f"Failed to load config from {path}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return AppConfig()
+        """Load config using the standalone loader."""
+        return load_app_config(path)
 
     def _audio_callback(self, outdata, frames, time_info, status):
         try:
             if status:
                 logger.warning(f"Audio stream status: {status}")
             t = (self.audio_phase + np.arange(frames)) / self.sample_rate
-            t = t.reshape(-1, 1)
+            t_reshaped = np.reshape(t, (-1, 1))
             amplitude = np.iinfo(np.int16).max * 0.3
-            outdata[:] = amplitude * np.sin(2 * np.pi * self.audio_frequency * t)
+            outdata[:] = amplitude * np.sin(2 * np.pi * self.audio_frequency * t_reshaped)
             self.audio_phase += frames
         except Exception as e:
             logger.error(f"Audio callback error: {e}")
@@ -1203,21 +1240,23 @@ class ScreenMonitor:
             return
         try:
             self.audio_phase = 0
-            self.audio_stream = sd.OutputStream(
+            stream = sd.OutputStream(
                 samplerate=self.sample_rate, channels=1, 
                 callback=self._audio_callback, dtype='int16'
             )
-            self.audio_stream.start()
+            self.audio_stream = stream
+            stream.start()
             logger.info("Continuous audio feedback started.")
         except Exception as e:
             logger.error(f"Failed to start audio stream: {e}")
             self.audio_stream = None
 
     def _stop_audio_feedback(self):
-        if self.audio_stream is not None:
+        stream = self.audio_stream
+        if stream is not None:
             try:
-                self.audio_stream.stop()
-                self.audio_stream.close()
+                stream.stop()
+                stream.close()
                 logger.info("Continuous audio feedback stopped.")
             except Exception as e:
                 logger.error(f"Error stopping audio stream: {e}")
@@ -1230,10 +1269,13 @@ class ScreenMonitor:
             try:
                 image = self._capture_screen()
                 frame_result, all_rois = self._process_frame(image)
-                
+
+                # Reset error counter on successful frame
+                self._consecutive_errors = 0
+
                 if self.update_callback:
                     self.update_callback(frame_result)
-                
+
                 if self.audio_feedback_enabled:
                     with self.audio_lock:
                         is_hf = frame_result.overall_is_hf if frame_result.overall_is_hf is not None else False
@@ -1241,7 +1283,7 @@ class ScreenMonitor:
                             self._start_audio_feedback()
                         elif not is_hf and self.audio_stream is not None:
                             self._stop_audio_feedback()
-                
+
                 # Handle logging: event-based or continuous
                 if self.log_events_only:
                     self._handle_logging(frame_result, all_rois)
@@ -1251,14 +1293,35 @@ class ScreenMonitor:
                     if current_time - self.last_continuous_log_time >= self.continuous_log_interval:
                         self._handle_continuous_logging(frame_result, all_rois)
                         self.last_continuous_log_time = current_time
-                
+
                 elapsed_time = time.time() - start_time
                 sleep_duration = self.app_config.screenshot_interval - elapsed_time
                 if sleep_duration > 0:
                     time.sleep(sleep_duration)
             except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}")
-                time.sleep(1)
+                self._consecutive_errors += 1
+                # Exponential backoff: 1s, 2s, 4s, 8s... capped at 30s
+                backoff = min(30.0, 2 ** (self._consecutive_errors - 1))
+                logger.error(f"Error in monitoring loop (attempt {self._consecutive_errors}): {e}")
+
+                if self._consecutive_errors >= self._max_consecutive_errors:
+                    logger.critical(
+                        f"Monitoring stopped after {self._consecutive_errors} consecutive errors. "
+                        f"Last error: {e}"
+                    )
+                    self.running = False
+                    self._stop_audio_feedback()
+                    # Notify GUI if callback is available
+                    if self.update_callback:
+                        try:
+                            error_result = FrameAnalysisResult()
+                            error_result.status_text = f"ERROR: Stopped after {self._consecutive_errors} failures"
+                            self.update_callback(error_result)
+                        except Exception:
+                            pass  # GUI may already be dead
+                    return
+
+                time.sleep(backoff)
 
     def _process_frame(self, image: np.ndarray) -> Tuple[FrameAnalysisResult, Dict[str, np.ndarray]]:
         frame_result = FrameAnalysisResult()
@@ -1367,8 +1430,9 @@ class ScreenMonitor:
                 logger.info(f"OVERLOAD UPDATE: '{self.last_known_overload}' -> '{current_overload}'")
             self.last_known_overload = current_overload
 
-        if not ocr_points_active and self.manual_points_info:
-            frame_result.points_info = self.manual_points_info
+        mpi = self.manual_points_info
+        if not ocr_points_active and mpi is not None:
+            frame_result.points_info = mpi
 
         if frame_result.frf_results:
             classifications = [res.is_high_frequency for res in frame_result.frf_results.values()]
@@ -1511,11 +1575,11 @@ class ScreenMonitor:
                 if self.plot_callback:
                     # Create lightweight copy for plot callback
                     lightweight_data = LightweightHitData(
-                        signal_physical=frf_result.signal_physical.copy() if frf_result.signal_physical is not None else np.array([]),
-                        filtered_physical=frf_result.filtered_physical.copy() if frf_result.filtered_physical is not None else None,
-                        residual_physical=frf_result.residual_physical.copy() if frf_result.residual_physical is not None else None,
-                        fft_freqs=frf_result.fft_freqs.copy(),
-                        fft_mags=frf_result.fft_mags.copy(),
+                        signal_physical=np.copy(frf_result.signal_physical) if frf_result.signal_physical is not None else np.array([]),
+                        filtered_physical=np.copy(frf_result.filtered_physical) if frf_result.filtered_physical is not None else None,
+                        residual_physical=np.copy(frf_result.residual_physical) if frf_result.residual_physical is not None else None,
+                        fft_freqs=np.copy(frf_result.fft_freqs),
+                        fft_mags=np.copy(frf_result.fft_mags),
                         energy_ratio=frf_result.energy_ratio,
                         is_high_frequency=frf_result.is_high_frequency,
                         exceedance_count=frf_result.exceedance_count,
@@ -1552,11 +1616,11 @@ class ScreenMonitor:
 
                 if self.plot_callback:
                     psd_lightweight = LightweightHitData(
-                        signal_physical=psd_result.signal_physical.copy() if psd_result.signal_physical is not None else np.array([]),
-                        filtered_physical=psd_result.filtered_physical.copy() if psd_result.filtered_physical is not None else None,
-                        residual_physical=psd_result.residual_physical.copy() if psd_result.residual_physical is not None else None,
-                        fft_freqs=psd_result.fft_freqs.copy(),
-                        fft_mags=psd_result.fft_mags.copy(),
+                        signal_physical=np.copy(psd_result.signal_physical) if psd_result.signal_physical is not None else np.array([]),
+                        filtered_physical=np.copy(psd_result.filtered_physical) if psd_result.filtered_physical is not None else None,
+                        residual_physical=np.copy(psd_result.residual_physical) if psd_result.residual_physical is not None else None,
+                        fft_freqs=np.copy(psd_result.fft_freqs),
+                        fft_mags=np.copy(psd_result.fft_mags),
                         energy_ratio=psd_result.energy_ratio,
                         is_high_frequency=psd_result.is_high_frequency,
                         exceedance_count=psd_result.exceedance_count,
@@ -1582,10 +1646,10 @@ class ScreenMonitor:
 
                 if self.plot_callback:
                     coh_lightweight = LightweightHitData(
-                        signal_physical=coh_result.signal_physical.copy(),
+                        signal_physical=np.copy(coh_result.signal_physical),
                         filtered_physical=None,
-                        residual_physical=coh_result.inverted_signal.copy(),
-                        fft_freqs=coh_result.freq_axis.copy() if coh_result.freq_axis is not None else np.array([]),
+                        residual_physical=np.copy(coh_result.inverted_signal),
+                        fft_freqs=np.copy(coh_result.freq_axis) if coh_result.freq_axis is not None else np.array([]),
                         fft_mags=np.array([]),
                         energy_ratio=coh_result.normalized_badness,
                         is_high_frequency=False,
@@ -1651,14 +1715,33 @@ class ScreenMonitor:
 
     def _ocr_roi_changed(self, name: str, roi: np.ndarray) -> bool:
         """Check if an OCR ROI has changed enough to warrant re-running OCR.
-        Uses mean pixel difference as a fast proxy for content change."""
+        Uses mean + std + downsampled pixel signature for robust change detection."""
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
-        current_hash = float(np.mean(gray))
-        prev_hash = self._ocr_roi_hash.get(name)
-        self._ocr_roi_hash[name] = current_hash
-        if prev_hash is None:
+
+        # Build a compact feature vector: mean, std, and 4x4 downsampled grid
+        mean_val = float(np.mean(gray))
+        std_val = float(np.std(gray))
+        small = cv2.resize(gray, (4, 4), interpolation=cv2.INTER_AREA)
+        spatial_sig = small.flatten().astype(float)
+
+        current_features = (mean_val, std_val, spatial_sig)
+        prev_features = self._ocr_roi_hash.get(name)
+        self._ocr_roi_hash[name] = current_features
+
+        if prev_features is None:
             return True  # First frame — must run OCR
-        return abs(current_hash - prev_hash) > self._ocr_change_threshold
+
+        prev_mean, prev_std, prev_spatial = prev_features
+
+        # Check if any feature has changed significantly
+        mean_diff = abs(mean_val - prev_mean)
+        std_diff = abs(std_val - prev_std)
+        spatial_diff = float(np.mean(np.abs(spatial_sig - prev_spatial)))
+
+        # Trigger re-OCR if any metric exceeds threshold
+        return (mean_diff > self._ocr_change_threshold or
+                std_diff > self._ocr_change_threshold * 0.5 or
+                spatial_diff > self._ocr_change_threshold * 0.8)
 
     def _preprocess_for_ocr(self, roi: np.ndarray, scale_factor: int = 4, 
                             use_clahe: bool = True, use_sharpen: bool = True,
@@ -1712,7 +1795,7 @@ class ScreenMonitor:
     def _analyze_status_robust(self, roi: np.ndarray) -> Tuple[str, Dict[str, np.ndarray]]:
         diag_imgs = {}
         
-        configs = [
+        configs: List[Dict[str, Any]] = [
             {'scale_factor': 4, 'use_clahe': True, 'use_sharpen': True, 'use_morphology': False, 'invert': True},
             {'scale_factor': 5, 'use_clahe': True, 'use_sharpen': False, 'use_morphology': True, 'invert': True},
             {'scale_factor': 3, 'use_clahe': False, 'use_sharpen': True, 'use_morphology': False, 'invert': True},
@@ -1723,7 +1806,14 @@ class ScreenMonitor:
         best_img = None
         
         for i, cfg in enumerate(configs):
-            preprocessed = self._preprocess_for_ocr(roi, **cfg)
+            preprocessed = self._preprocess_for_ocr(
+                roi,
+                scale_factor=int(cfg.get('scale_factor', 4)),
+                use_clahe=bool(cfg.get('use_clahe', True)),
+                use_sharpen=bool(cfg.get('use_sharpen', True)),
+                use_morphology=bool(cfg.get('use_morphology', False)),
+                invert=bool(cfg.get('invert', True))
+            )
             if preprocessed.size == 0:
                 continue
                 
@@ -1745,15 +1835,15 @@ class ScreenMonitor:
                     best_text = text
                     best_img = preprocessed
         
-        mean_color = np.mean(roi, axis=(0, 1))
+        mean_b, mean_g, mean_r = cv2.mean(roi)[:3]
         if best_img is not None:
             diag_imgs['status_preprocessed'] = best_img
         
-        if mean_color[1] > 120 and mean_color[1] > mean_color[2]:
+        if mean_g > 120 and mean_g > mean_r:
             return "Measuring... (color)", diag_imgs
-        if mean_color[2] > 120 and mean_color[2] > mean_color[1]:
+        if mean_r > 120 and mean_r > mean_g:
             return "Waiting for Trigger... (color)", diag_imgs
-        if mean_color[0] > 120:
+        if mean_b > 120:
             return "Ready (color)", diag_imgs
         
         return f"Unknown (OCR: '{best_text[:20]}')" if best_text else "Unknown", diag_imgs
@@ -1761,8 +1851,8 @@ class ScreenMonitor:
     def _analyze_overload_robust(self, roi: np.ndarray) -> Tuple[str, Dict[str, np.ndarray]]:
         diag_imgs = {}
         
-        mean_color = np.mean(roi, axis=(0, 1))
-        is_red = mean_color[2] > 150 and mean_color[1] < 100 and mean_color[0] < 100
+        mean_b, mean_g, mean_r = cv2.mean(roi)[:3]
+        is_red = mean_r > 150 and mean_g < 100 and mean_b < 100
         
         if not is_red:
             return "No Overload", diag_imgs
@@ -1782,7 +1872,7 @@ class ScreenMonitor:
     def _analyze_run_robust(self, roi: np.ndarray) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
         diag_imgs = {}
         
-        configs = [
+        configs: List[Dict[str, Any]] = [
             {'scale_factor': 5, 'use_clahe': True, 'use_sharpen': True, 'use_morphology': False, 'invert': True},
             {'scale_factor': 4, 'use_clahe': True, 'use_sharpen': False, 'use_morphology': True, 'invert': True},
             {'scale_factor': 6, 'use_clahe': False, 'use_sharpen': True, 'use_morphology': False, 'invert': True},
@@ -1791,7 +1881,14 @@ class ScreenMonitor:
         whitelist = 'Run0123456789 '
         
         for i, cfg in enumerate(configs):
-            preprocessed = self._preprocess_for_ocr(roi, **cfg)
+            preprocessed = self._preprocess_for_ocr(
+                roi,
+                scale_factor=int(cfg.get('scale_factor', 4)),
+                use_clahe=bool(cfg.get('use_clahe', True)),
+                use_sharpen=bool(cfg.get('use_sharpen', True)),
+                use_morphology=bool(cfg.get('use_morphology', False)),
+                invert=bool(cfg.get('invert', True))
+            )
             if preprocessed.size == 0:
                 continue
             
@@ -1850,7 +1947,7 @@ class ScreenMonitor:
     def _analyze_point_only(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
         diag_imgs = {}
         
-        configs = [
+        configs: List[Dict[str, Any]] = [
             {'scale_factor': 5, 'use_clahe': True, 'use_sharpen': True, 'use_morphology': False},
             {'scale_factor': 6, 'use_clahe': True, 'use_sharpen': False, 'use_morphology': True},
             {'scale_factor': 4, 'use_clahe': False, 'use_sharpen': True, 'use_morphology': False},
@@ -1859,7 +1956,14 @@ class ScreenMonitor:
         whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789 '
         
         for i, cfg in enumerate(configs):
-            preprocessed = self._preprocess_for_ocr(roi, **cfg)
+            preprocessed = self._preprocess_for_ocr(
+                roi,
+                scale_factor=int(cfg.get('scale_factor', 4)),
+                use_clahe=bool(cfg.get('use_clahe', True)),
+                use_sharpen=bool(cfg.get('use_sharpen', True)),
+                use_morphology=bool(cfg.get('use_morphology', False)),
+                invert=bool(cfg.get('invert', True))
+            )
             if preprocessed.size == 0:
                 continue
             
@@ -1888,7 +1992,7 @@ class ScreenMonitor:
     def _analyze_direction_only(self, roi: np.ndarray, name: str) -> Tuple[Optional[str], Dict[str, np.ndarray]]:
         diag_imgs = {}
         
-        configs = [
+        configs: List[Dict[str, Any]] = [
             {'scale_factor': 6, 'use_clahe': True, 'use_sharpen': True},
             {'scale_factor': 5, 'use_clahe': False, 'use_sharpen': True},
         ]
@@ -1896,7 +2000,14 @@ class ScreenMonitor:
         whitelist = '+-XYZxyz'
         
         for i, cfg in enumerate(configs):
-            preprocessed = self._preprocess_for_ocr(roi, **cfg)
+            preprocessed = self._preprocess_for_ocr(
+                roi,
+                scale_factor=int(cfg.get('scale_factor', 4)),
+                use_clahe=bool(cfg.get('use_clahe', True)),
+                use_sharpen=bool(cfg.get('use_sharpen', True)),
+                use_morphology=bool(cfg.get('use_morphology', False)),
+                invert=bool(cfg.get('invert', True))
+            )
             if preprocessed.size == 0:
                 continue
             
@@ -1968,13 +2079,15 @@ class ScreenMonitor:
                 return None
 
             # Build signal vector (same as FRF)
-            signal_pixels = np.zeros(roi.shape[1], dtype=np.float64)
+            signal_pixels_list: List[float] = []
             for col in range(roi.shape[1]):
                 col_pixels = np.where(mask[:, col] > 0)[0]
                 if len(col_pixels) > 0:
-                    signal_pixels[col] = float(roi.shape[0] - int(np.mean(col_pixels))) / roi.shape[0]
+                    signal_pixels_list.append(float(roi.shape[0] - int(np.mean(col_pixels))) / roi.shape[0])
                 else:
-                    signal_pixels[col] = np.nan
+                    signal_pixels_list.append(np.nan)
+            
+            signal_pixels = np.array(signal_pixels_list, dtype=np.float64)
 
             # Fill NaN gaps
             nans = np.isnan(signal_pixels)
@@ -2228,7 +2341,8 @@ class ScreenMonitor:
         )
 
     def classify_hit(
-        self, frame_result: FrameAnalysisResult
+        self, frame_result: FrameAnalysisResult,
+        enabled_methods: Optional[dict] = None
     ) -> Tuple[str, str]:
         """
         Determine hit quality classification from a FrameAnalysisResult.
@@ -2240,10 +2354,14 @@ class ScreenMonitor:
             (classification_text, severity_color) where severity_color is one of
             "green", "orange", or "red".
         """
-        frf_fft_bad = frame_result.overall_is_hf or False
-        frf_lp_bad = frame_result.overall_lowpass_bad or False
-        psd_fft_bad = frame_result.psd_overall_is_hf or False
-        psd_lp_bad = frame_result.psd_overall_lowpass_bad or False
+        if enabled_methods is None:
+            enabled_methods = {'frf_fft': True, 'frf_lp': True, 
+                              'psd_fft': True, 'psd_lp': True}
+
+        frf_fft_bad = (frame_result.overall_is_hf or False) and enabled_methods.get('frf_fft', True)
+        frf_lp_bad = (frame_result.overall_lowpass_bad or False) and enabled_methods.get('frf_lp', True)
+        psd_fft_bad = (frame_result.psd_overall_is_hf or False) and enabled_methods.get('psd_fft', True)
+        psd_lp_bad = (frame_result.psd_overall_lowpass_bad or False) and enabled_methods.get('psd_lp', True)
 
         any_bad = frf_fft_bad or frf_lp_bad or psd_fft_bad or psd_lp_bad
         all_bad = (frf_fft_bad or frf_lp_bad) and (psd_fft_bad or psd_lp_bad) if (
@@ -2275,7 +2393,16 @@ class ScreenMonitor:
     # VISUAL LOGGING - THREAD-SAFE (Using Figure directly, not pyplot)
     # =========================================================================
 
-    def _create_visual_logs(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult, 
+    def _cleanup_figure(self, fig):
+        """Clean up a matplotlib figure and periodically run garbage collection."""
+        if fig is not None:
+            fig.clf()
+            del fig
+        self._figure_count += 1
+        if self._figure_count % self._gc_every_n_figures == 0:
+            gc.collect()
+
+    def _create_visual_logs(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult,
                            frf_name: str, base_filename: str, all_rois: Dict[str, np.ndarray]):
         try:
             region = frame_result.active_regions[frf_name]
@@ -2331,16 +2458,19 @@ class ScreenMonitor:
         """Thread-safe signal plot creation using Figure directly."""
         fig = None
         try:
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
+            
+            phys = frf_result.signal_physical
+            if phys is None: return
             
             fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            num_points = len(frf_result.signal_physical)
+            num_points = len(phys)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             
-            ax.plot(freq_axis, frf_result.signal_physical, color='cyan', linewidth=1.5)
+            ax.plot(freq_axis, phys, color='cyan', linewidth=1.5)
             ax.set_xlabel('Frequency (Hz)', color='white')
             ax.set_ylabel(f'Amplitude ({region.y_axis_unit})', color='white')
             ax.set_title(f'Reconstructed Signal\n{title_info}', color='white', fontsize=10)
@@ -2354,17 +2484,14 @@ class ScreenMonitor:
             fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
         finally:
-            if fig is not None:
-                fig.clf()
-                del fig
-            gc.collect()
+            self._cleanup_figure(fig)
 
     def _create_fft_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion, 
                               title_info: str, filename: str):
         """Thread-safe FFT plot creation."""
         fig = None
         try:
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
             
             fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
             canvas = FigureCanvasAgg(fig)
@@ -2395,33 +2522,29 @@ class ScreenMonitor:
             fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
         finally:
-            if fig is not None:
-                fig.clf()
-                del fig
-            gc.collect()
+            self._cleanup_figure(fig)
 
     def _create_lowpass_comparison_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
                                              title_info: str, filename: str):
         """Thread-safe lowpass comparison plot creation."""
         fig = None
         try:
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
+            
+            phys = frf_result.signal_physical
+            filtered = frf_result.filtered_physical
+            if phys is None or filtered is None:
+                return
             
             fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            if frf_result.signal_physical is None or frf_result.filtered_physical is None:
-                ax.text(0.5, 0.5, 'No lowpass data available', 
-                       transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
-                fig.savefig(filename, facecolor=fig.get_facecolor())
-                return
-            
-            num_points = len(frf_result.signal_physical)
+            num_points = len(phys)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             
-            ax.plot(freq_axis, frf_result.signal_physical, 'w-', linewidth=2, label='Original', alpha=0.9)
-            ax.plot(freq_axis, frf_result.filtered_physical, 'g--', linewidth=1.5, label='Lowpass Filtered')
+            ax.plot(freq_axis, phys, 'w-', linewidth=2, label='Original', alpha=0.9)
+            ax.plot(freq_axis, filtered, 'g--', linewidth=1.5, label='Lowpass Filtered')
             
             filter_info = f'Cutoff: {self.app_config.lowpass_cutoff:.3f} | Order: {self.app_config.lowpass_filter_order}'
             ax.set_title(f'Lowpass Filter Comparison\n{title_info}\n{filter_info}', 
@@ -2439,41 +2562,36 @@ class ScreenMonitor:
             fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
         finally:
-            if fig is not None:
-                fig.clf()
-                del fig
-            gc.collect()
+            self._cleanup_figure(fig)
 
     def _create_residual_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
                                    title_info: str, filename: str):
         """Thread-safe residual plot creation."""
         fig = None
         try:
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
+            
+            resid = frf_result.residual_physical
+            if resid is None:
+                return
             
             fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
             
-            if frf_result.residual_physical is None:
-                ax.text(0.5, 0.5, 'No residual data available', 
-                       transform=ax.transAxes, ha='center', va='center', color='white', fontsize=14)
-                fig.savefig(filename, facecolor=fig.get_facecolor())
-                return
-            
-            num_points = len(frf_result.residual_physical)
+            num_points = len(resid)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
             threshold = self.app_config.residual_threshold
             
-            ax.plot(freq_axis, frf_result.residual_physical, 'c-', linewidth=1, label='Residual (HF Content)')
+            ax.plot(freq_axis, resid, 'c-', linewidth=1, label='Residual (HF Content)')
             ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
             ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5, 
                       label=f'Threshold (±{threshold} {region.y_axis_unit})')
             ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
             
-            exceedances = np.abs(frf_result.residual_physical) > threshold
+            exceedances = np.abs(resid) > threshold
             if np.any(exceedances):
-                ax.scatter(freq_axis[exceedances], frf_result.residual_physical[exceedances], 
+                ax.scatter(freq_axis[exceedances], resid[exceedances], 
                           c='red', s=15, zorder=5, alpha=0.7)
             
             classification = "BAD HIT" if frf_result.lowpass_is_bad_hit else "GOOD HIT"
@@ -2494,10 +2612,7 @@ class ScreenMonitor:
             fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
         finally:
-            if fig is not None:
-                fig.clf()
-                del fig
-            gc.collect()
+            self._cleanup_figure(fig)
 
     def _create_run_summary_chart_safe(self, hit_data: Dict, filename: str):
         """Thread-safe run summary chart creation."""
@@ -2506,7 +2621,7 @@ class ScreenMonitor:
         
         fig = None
         try:
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
             import matplotlib.cm as cm
             
             fig = Figure(figsize=(12, 6), dpi=150, facecolor='#1E1E1E')
@@ -2542,10 +2657,7 @@ class ScreenMonitor:
             fig.tight_layout()
             fig.savefig(filename, facecolor=fig.get_facecolor())
         finally:
-            if fig is not None:
-                fig.clf()
-                del fig
-            gc.collect()
+            self._cleanup_figure(fig)
     
     # =========================================================================
     # DATA FILE LOGGING
@@ -2554,20 +2666,27 @@ class ScreenMonitor:
 
     def _save_unv_log(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult, 
                       frf_name: str, base_filename: str):
-        def parse_point(point_str: str) -> int: 
-            return int(re.sub(r'\D', '', point_str)) if point_str and re.sub(r'\D', '', point_str) else 1
+        def parse_point(point_str: Optional[str]) -> int: 
+            if not point_str: return 1
+            digits = re.sub(r'\D', '', point_str)
+            return int(digits) if digits else 1
         
-        def parse_dof(dir_str: str) -> int: 
-            if not dir_str or len(dir_str) < 1:
-                return 3
-            last_char = dir_str.upper()[-1]
-            return {'X': 1, 'Y': 2, 'Z': 3}.get(last_char, 3)
+        def parse_dof(dir_str: Optional[str]) -> int: 
+            if not dir_str: return 3
+            ds = dir_str.upper()
+            if ds.endswith('X'): return 1
+            if ds.endswith('Y'): return 2
+            return 3
         
         try:
             filename = f"signal_logs/{base_filename}.unv"
             region = frame_result.active_regions[frf_name]
             points = frame_result.points_info
-            num_points = len(frf_result.signal_physical)
+            
+            phys = frf_result.signal_physical
+            if phys is None:
+                return
+            num_points = len(phys)
             
             if num_points < 2:
                 logger.warning(f"Skipping UNV log for {frf_name}: insufficient data points ({num_points})")
@@ -2589,7 +2708,7 @@ class ScreenMonitor:
                 id_line1 = f"FRF for {points.response_point}:{points.response_dir}/{points.hammer_point}:{points.hammer_dir}"
                 f.write(f"{id_line1[:80]:<80}\n")
                 
-                id_line2 = "USMA v0.4.5 - Screen Reconstruction"
+                id_line2 = f"USMA v{APP_VERSION} - Screen Reconstruction"
                 f.write(f"{id_line2[:80]:<80}\n")
                 
                 f.write(f"{timestamp:<80}\n")
@@ -2640,7 +2759,7 @@ class ScreenMonitor:
                 f.write(f"{13:10d}{0:5d}{0:5d}{0:5d}{'Z-axis':20s}{'NONE':20s}\n")
                 f.write(f"{0:10d}{0:5d}{0:5d}{0:5d}{'NONE':20s}{'NONE':20s}\n")
                 
-                for val in frf_result.signal_physical:
+                for val in phys:
                     real_part = val
                     imag_part = 0.0
                     f.write(f"  {real_part:13.6E}  {imag_part:13.6E}\n")
@@ -2666,8 +2785,9 @@ class StartupDialog(tk.Toplevel):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("USMA v0.9.0 - Startup")
-        self.result = None
+        self.title(f"USMA v{APP_VERSION} - Startup")
+        self.result: Optional[str] = None
+        self.config_var: Optional[tk.StringVar] = None
 
         # Don't use transient() with hidden parent - causes display issues on Windows
         # self.transient(parent)  # REMOVED
@@ -2677,9 +2797,9 @@ class StartupDialog(tk.Toplevel):
 
         # Set window size based on content
         # Larger window when configs exist to show all buttons
-        window_height = 320 if self.config_files else 250
+        window_height = 450 if self.config_files else 350
         self.geometry(f"450x{window_height}")
-        self.resizable(False, False)
+        self.resizable(True, True)
 
         self._setup_ui()
 
@@ -2714,7 +2834,7 @@ class StartupDialog(tk.Toplevel):
         title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
         ttk.Label(title_frame, text="USMA - Unified Screen Monitoring Application",
                   font=("Segoe UI", 11, "bold")).pack()
-        ttk.Label(title_frame, text="v0.9.0 - Calibration Wizard Release",
+        ttk.Label(title_frame, text=f"v{APP_VERSION}",
                   font=("Segoe UI", 9)).pack()
 
         separator = ttk.Separator(self, orient=tk.HORIZONTAL)
@@ -2729,8 +2849,9 @@ class StartupDialog(tk.Toplevel):
             combo_frame.pack(fill=tk.X, padx=10, pady=10)
 
             ttk.Label(combo_frame, text="Select Config:").pack(side=tk.LEFT, padx=(0, 5))
-            self.config_var = tk.StringVar(value=self.config_files[0])
-            config_combo = ttk.Combobox(combo_frame, textvariable=self.config_var,
+            c_var = tk.StringVar(value=self.config_files[0])
+            self.config_var = c_var
+            config_combo = ttk.Combobox(combo_frame, textvariable=c_var,
                                         values=self.config_files, state='readonly', width=30)
             config_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
@@ -2758,10 +2879,12 @@ class StartupDialog(tk.Toplevel):
 
     def _on_load(self):
         """Set result to selected config path."""
-        selected = self.config_var.get()
-        if selected:
-            self.result = os.path.join("configs", selected)
-            self.destroy()
+        c_var = self.config_var
+        if c_var is not None:
+            selected = c_var.get()
+            if selected:
+                self.result = os.path.join("configs", selected)
+                self.destroy()
 
     def _on_new_calibration(self):
         """Set result to trigger new calibration."""
@@ -2786,11 +2909,11 @@ class CalibrationChoiceDialog(tk.Toplevel):
 
     def __init__(self, parent, config_name: str = ""):
         super().__init__(parent)
-        self.title("USMA v0.9.0 - Parameter Selection")
-        self.result = None
+        self.title(f"USMA v{APP_VERSION} - Parameter Selection")
+        self.result: Optional[str] = None
 
-        self.geometry("420x320")
-        self.resizable(False, False)
+        self.geometry("500x400")
+        self.resizable(True, True)
 
         # Center on screen
         self.update_idletasks()
@@ -2876,12 +2999,24 @@ class HSVCalibrationWindow(tk.Toplevel):
         self.title("HSV Color Filter Calibration")
         self.screenshot = screenshot
         self.wave_regions = wave_regions
-        self.result_hsv_lower = None
-        self.result_hsv_upper = None
+        self.wave_regions = wave_regions
+        self.result_hsv_lower: Optional[List[int]] = None
+        self.result_hsv_upper: Optional[List[int]] = None
+        self.region_var: Optional[tk.StringVar] = None
+        
+        # UI Attributes for Pyre2
+        self.zoom_label = cast(ttk.Label, None)
+        self.preview_canvas = cast(tk.Canvas, None)
+        self.h_min_var = cast(tk.IntVar, None)
+        self.h_max_var = cast(tk.IntVar, None)
+        self.s_min_var = cast(tk.IntVar, None)
+        self.s_max_var = cast(tk.IntVar, None)
+        self.v_min_var = cast(tk.IntVar, None)
+        self.v_max_var = cast(tk.IntVar, None)
 
         # Current values (copy to avoid modifying original until Apply)
-        self.hsv_lower = list(current_hsv_lower)
-        self.hsv_upper = list(current_hsv_upper)
+        self.hsv_lower: List[int] = list(current_hsv_lower)
+        self.hsv_upper: List[int] = list(current_hsv_upper)
 
         # Selected region for preview
         self.selected_region_name = list(wave_regions.keys())[0] if wave_regions else None
@@ -2899,7 +3034,7 @@ class HSVCalibrationWindow(tk.Toplevel):
         self.grab_set()
 
         # Initial preview update (delayed to ensure canvas is ready)
-        self.after(100, self._update_preview)
+        self.after(100, lambda *args, **kwargs: self._update_preview())
 
     def _setup_ui(self):
         # Top: Region selector (if multiple wave regions)
@@ -2907,8 +3042,9 @@ class HSVCalibrationWindow(tk.Toplevel):
             selector_frame = ttk.Frame(self)
             selector_frame.pack(fill=tk.X, padx=10, pady=5)
             ttk.Label(selector_frame, text="Preview Region:").pack(side=tk.LEFT)
-            self.region_var = tk.StringVar(value=self.selected_region_name)
-            region_combo = ttk.Combobox(selector_frame, textvariable=self.region_var,
+            r_var = tk.StringVar(value=self.selected_region_name)
+            self.region_var = r_var
+            region_combo = ttk.Combobox(selector_frame, textvariable=r_var,
                                         values=list(self.wave_regions.keys()), state='readonly', width=20)
             region_combo.pack(side=tk.LEFT, padx=5)
             region_combo.bind("<<ComboboxSelected>>", self._on_region_changed)
@@ -3117,7 +3253,8 @@ class HSVCalibrationWindow(tk.Toplevel):
             self.preview_canvas.create_image(x_offset, y_offset, image=self.preview_photo, anchor=tk.NW)
 
     def _on_region_changed(self, event=None):
-        self.selected_region_name = self.region_var.get()
+        if self.region_var is not None:
+            self.selected_region_name = self.region_var.get()
         self.pan_x = 0
         self.pan_y = 0
         self._update_preview()
@@ -3155,7 +3292,7 @@ class ROITypeDialog(tk.Toplevel):
         self.result = None
         self.region_name = region_name
 
-        self.geometry("350x280")
+        self.geometry("500x400")
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
@@ -3243,7 +3380,7 @@ class ConfigToolWindow(tk.Toplevel):
         # Initialize app_config - load from preload_config_path if provided
         if preload_config_path and os.path.exists(preload_config_path):
             # Load existing config
-            self.app_config = ScreenMonitor(preload_config_path).app_config
+            self.app_config = load_app_config(preload_config_path)
             self.current_config_path = preload_config_path
         else:
             self.app_config = AppConfig()
@@ -3317,7 +3454,10 @@ class ConfigToolWindow(tk.Toplevel):
         self.canvas.bind("<Configure>", self._on_canvas_resize)
     
     def _on_mousewheel(self, event):
-        self.right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        try:
+            self.right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        except tk.TclError:
+            pass
     
     def _build_right_panel_content(self, parent):
         capture_frame = ttk.LabelFrame(parent, text="Capture")
@@ -3329,6 +3469,14 @@ class ConfigToolWindow(tk.Toplevel):
                                        command=self._open_hsv_calibration)
         self.hsv_cal_btn.pack(fill=tk.X, pady=(0, 5), padx=5)
         self.hsv_cal_btn.config(state=tk.DISABLED)  # Disabled by default
+
+        monitor_frame = ttk.Frame(capture_frame)
+        monitor_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(monitor_frame, text="Monitor:").pack(side=tk.LEFT)
+        self.monitor_index_var = tk.IntVar(value=self.app_config.monitor_index)
+        ttk.Spinbox(monitor_frame, from_=0, to=5, increment=1,
+                    textvariable=self.monitor_index_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(monitor_frame, text="(0=all, 1=primary, 2+=secondary)").pack(side=tk.LEFT)
 
         list_frame = ttk.LabelFrame(parent, text="Defined Regions")
         list_frame.pack(fill=tk.X, pady=5, padx=5)
@@ -3476,7 +3624,18 @@ class ConfigToolWindow(tk.Toplevel):
         self.withdraw()
         self.main_root.iconify()
         time.sleep(0.5)
-        self.screenshot = cv2.cvtColor(np.array(pyautogui.screenshot()), cv2.COLOR_RGB2BGR)
+        
+        if MSS_AVAILABLE:
+            with mss.mss() as sct:
+                idx = self.monitor_index_var.get()
+                if idx >= len(sct.monitors):
+                    idx = 1
+                monitor = sct.monitors[idx]
+                sct_img = sct.grab(monitor)
+                self.screenshot = cv2.cvtColor(np.array(sct_img, dtype=np.uint8), cv2.COLOR_BGRA2BGR)
+        else:
+            self.screenshot = cv2.cvtColor(np.array(pyautogui.screenshot()), cv2.COLOR_RGB2BGR)
+
         self.deiconify()
         self.lift()
         self.focus_force()
@@ -3615,9 +3774,11 @@ class ConfigToolWindow(tk.Toplevel):
         self.wait_window(hsv_window)
 
         # Apply results if user clicked Apply
-        if hsv_window.result_hsv_lower is not None:
-            self.app_config.hsv_lower = hsv_window.result_hsv_lower
-            self.app_config.hsv_upper = hsv_window.result_hsv_upper
+        lower = hsv_window.result_hsv_lower
+        upper = hsv_window.result_hsv_upper
+        if lower is not None and upper is not None:
+            self.app_config.hsv_lower = lower
+            self.app_config.hsv_upper = upper
             messagebox.showinfo("Success", "HSV color filter updated.", parent=self)
 
     def _apply_params(self):
@@ -3627,6 +3788,7 @@ class ConfigToolWindow(tk.Toplevel):
         self.app_config.lowpass_filter_order = self.param_vars['lowpass_filter_order'].get()
         self.app_config.residual_threshold = self.param_vars['residual_threshold'].get()
         self.app_config.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
+        self.app_config.monitor_index = self.monitor_index_var.get()
         messagebox.showinfo("Success", "Analysis parameters updated.", parent=self)
 
     def _update_ui_from_data(self):
@@ -3758,6 +3920,7 @@ class ConfigToolWindow(tk.Toplevel):
                 'coherence_threshold': self.app_config.coherence_threshold,
                 'coherence_degradation_pct': self.app_config.coherence_degradation_pct,
                 'hits_per_run': self.app_config.hits_per_run,
+                'monitor_index': self.app_config.monitor_index,
             }
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -3773,7 +3936,7 @@ class ConfigToolWindow(tk.Toplevel):
         if not path:
             return
         try:
-            self.app_config = ScreenMonitor(path).app_config
+            self.app_config = load_app_config(path)
             self._update_ui_from_data()
             if self.screenshot:
                 self._redraw_regions_on_canvas()
@@ -3853,13 +4016,13 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
         
-        # Horizontal PanedWindow for split view (Graph | Console)
-        self.paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Side-by-side view (Graph left | Console right)
+        content_frame = ttk.Frame(self)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Left side: Graph
-        graph_frame = ttk.LabelFrame(self.paned, text="Live Graph")
-        self.paned.add(graph_frame, weight=3)
+        graph_frame = ttk.LabelFrame(content_frame, text="Live Graph")
+        graph_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
         self.figure = Figure(figsize=(6, 3), dpi=100, facecolor='#1E1E1E')
         self.ax = self.figure.add_subplot(111)
@@ -3872,8 +4035,8 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
         # Right side: Console
-        console_frame = ttk.LabelFrame(self.paned, text="Console Output")
-        self.paned.add(console_frame, weight=2)
+        console_frame = ttk.LabelFrame(content_frame, text="Console Output")
+        console_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
         
         # Console text widget with scrollbar
         console_inner = ttk.Frame(console_frame)
@@ -4121,8 +4284,10 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.ax.plot(hit_data.fft_freqs, hit_data.fft_mags, color='magenta', linewidth=1)
         
         if self.app_config:
-            self.ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
-                           linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
+            prefix = "psd_" if hit_data.signal_type == "psd" else ""
+            cutoff = getattr(self.app_config, f"{prefix}fft_cutoff_frequency")
+            self.ax.axvline(x=cutoff, color='yellow',
+                           linestyle='--', linewidth=1, label=f'Cutoff: {cutoff:.2f}')
         
         self.ax.set_xlim(0, 0.5)
         self.ax.set_xlabel('Normalized Frequency', color='white')
@@ -4150,7 +4315,9 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.ax.set_ylabel(f'Amplitude ({hit_data.y_axis_unit})', color='white')
         
         if self.app_config:
-            title = f'Lowpass - {hit_data.hit_key} - Cutoff: {self.app_config.lowpass_cutoff:.3f}'
+            prefix = "psd_" if hit_data.signal_type == "psd" else ""
+            lp_cutoff = getattr(self.app_config, f"{prefix}lowpass_cutoff")
+            title = f'Lowpass - {hit_data.hit_key} - Cutoff: {lp_cutoff:.3f}'
         else:
             title = f'Lowpass Comparison - {hit_data.hit_key}'
         self.ax.set_title(title, color='white', fontsize=10)
@@ -4167,7 +4334,8 @@ class GraphViewerFrame(ttk.LabelFrame):
         freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
         
         if self.app_config:
-            threshold = self.app_config.residual_threshold
+            prefix = "psd_" if hit_data.signal_type == "psd" else ""
+            threshold = getattr(self.app_config, f"{prefix}residual_threshold")
         else:
             threshold = 0.005
         
@@ -4249,7 +4417,7 @@ class MonitorControlGUI:
     def __init__(self, root, config_path=None, calibration_mode: bool = False):
         self.root = root
         self.calibration_mode = calibration_mode
-        self.root.title("USMA v0.9.1 - Calibration Engine Release")
+        self.root.title(f"USMA v{APP_VERSION}")
         self.root.geometry("1000x750")
 
         # Use provided config path or default
@@ -4307,10 +4475,10 @@ class MonitorControlGUI:
             'response_point': tk.StringVar(value='P1'),
             'response_dir': tk.StringVar(value='-Z')
         }
-        
         initial_freq = 1.0/self.monitor.app_config.screenshot_interval if self.monitor.app_config.screenshot_interval > 0 else 4.0
         self.sample_frequency = tk.DoubleVar(value=round(initial_freq, 2))
         
+        self.param_vars = {}
         self.overlay = None
         self._setup_main_gui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -4393,6 +4561,7 @@ class MonitorControlGUI:
         ttk.Label(feedback_frame, textvariable=self.status_var, font=("Segoe UI", 10)).grid(row=2, column=1, sticky=tk.W, padx=5)
         ttk.Label(feedback_frame, textvariable=self.overload_var, font=("Segoe UI", 10)).grid(row=2, column=2, sticky=tk.W, padx=5)
         ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=2, column=3, columnspan=2, sticky=tk.W, padx=5)
+        
         feedback_frame.columnconfigure(3, weight=1)
         
         # Graph viewer with reduced minimum height
@@ -4518,6 +4687,8 @@ class MonitorControlGUI:
         # Store right_panel reference for dynamic panel swapping
         self.right_panel = right_panel
 
+        self._setup_classification_lights(right_panel)
+
         # --- Calibration status indicator (compact, shown in both modes) ---
         self._setup_calibration_status_bar(right_panel)
 
@@ -4536,7 +4707,10 @@ class MonitorControlGUI:
     
     def _on_mousewheel(self, event):
         """Handle mouse wheel scrolling."""
-        self.main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        try:
+            self.main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        except tk.TclError:
+            pass
     
     def _on_main_resize(self, event):
         """Resize canvas window when main window resizes."""
@@ -4573,32 +4747,112 @@ class MonitorControlGUI:
     def _apply_params_live(self):
         """Apply parameter changes to the running monitor immediately."""
         try:
-            self.monitor.app_config.fft_cutoff_frequency = self.param_vars['fft_cutoff_frequency'].get()
-            self.monitor.app_config.fft_energy_ratio_threshold = self.param_vars['fft_energy_ratio_threshold'].get()
-            self.monitor.app_config.lowpass_cutoff = self.param_vars['lowpass_cutoff'].get()
-            self.monitor.app_config.lowpass_filter_order = self.param_vars['lowpass_filter_order'].get()
-            self.monitor.app_config.residual_threshold = self.param_vars['residual_threshold'].get()
-            self.monitor.app_config.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
+            cfg = self.monitor.app_config
+            cfg.fft_cutoff_frequency = self.param_vars['fft_cutoff_frequency'].get()
+            cfg.fft_energy_ratio_threshold = self.param_vars['fft_energy_ratio_threshold'].get()
+            cfg.lowpass_cutoff = self.param_vars['lowpass_cutoff'].get()
+            cfg.lowpass_filter_order = int(self.param_vars['lowpass_filter_order'].get())
+            cfg.residual_threshold = self.param_vars['residual_threshold'].get()
+            cfg.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
+
+            cfg.psd_fft_cutoff_frequency = self.param_vars['psd_fft_cutoff_frequency'].get()
+            cfg.psd_fft_energy_ratio_threshold = self.param_vars['psd_fft_energy_ratio_threshold'].get()
+            cfg.psd_lowpass_cutoff = self.param_vars['psd_lowpass_cutoff'].get()
+            cfg.psd_lowpass_filter_order = int(self.param_vars['psd_lowpass_filter_order'].get())
+            cfg.psd_residual_threshold = self.param_vars['psd_residual_threshold'].get()
+            cfg.psd_exceedance_ratio_threshold = self.param_vars['psd_exceedance_ratio_threshold'].get()
 
             # Also update the graph viewer's reference
-            self.graph_viewer.app_config = self.monitor.app_config
+            self.graph_viewer.app_config = cfg
 
-            if self.verbose_logging_on.get():
-                logger.info(f"Parameters updated live: FFT_cut={self.monitor.app_config.fft_cutoff_frequency:.3f}, "
-                           f"FFT_thr={self.monitor.app_config.fft_energy_ratio_threshold:.4f}, "
-                           f"LP_cut={self.monitor.app_config.lowpass_cutoff:.3f}")
-        except tk.TclError as e:
-            logger.warning(f"Invalid parameter value: {e}")
+            logger.info(f"Parameters applied — FRF: FFT={cfg.fft_cutoff_frequency:.4f}, "
+                        f"E.Ratio={cfg.fft_energy_ratio_threshold:.4f}, LP={cfg.lowpass_cutoff:.4f}, "
+                        f"Order={cfg.lowpass_filter_order}, Res={cfg.residual_threshold:.6f}, "
+                        f"Exc={cfg.exceedance_ratio_threshold:.4f} | PSD: FFT={cfg.psd_fft_cutoff_frequency:.4f}, "
+                        f"E.Ratio={cfg.psd_fft_energy_ratio_threshold:.4f}, LP={cfg.psd_lowpass_cutoff:.4f}, "
+                        f"Order={cfg.psd_lowpass_filter_order}, Res={cfg.psd_residual_threshold:.6f}, "
+                        f"Exc={cfg.psd_exceedance_ratio_threshold:.4f}")
+        except tk.TclError:
+            pass  # User mid-edit, ignore
+
+    def _setup_classification_lights(self, parent):
+        self.enabled_methods = {'frf_fft': True, 'frf_lp': True, 'psd_fft': True, 'psd_lp': True}
+        self.method_lights = {}
+        self.last_analysis_result = None
+        
+        lights_frame = ttk.LabelFrame(parent, text="Classification Methods")
+        lights_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        methods = [('FRF-FFT', 'frf_fft'), ('FRF-LP', 'frf_lp'), ('PSD-FFT', 'psd_fft'), ('PSD-LP', 'psd_lp')]
+        for label_text, method_key in methods:
+            container = ttk.Frame(lights_frame, cursor="hand2")
+            container.pack(side=tk.LEFT, padx=5)
+            
+            try:
+                bg_color = parent.master.winfo_toplevel().cget('bg')
+            except tk.TclError:
+                bg_color = 'SystemButtonFace'
+
+            canvas = tk.Canvas(container, width=12, height=12, bg=bg_color, highlightthickness=0)
+            canvas.pack(side=tk.LEFT, pady=2)
+            canvas.create_oval(1, 1, 11, 11, fill="gray", tags="light")
+            lbl = ttk.Label(container, text=label_text)
+            lbl.pack(side=tk.LEFT, padx=(2, 0))
+            self.method_lights[method_key] = canvas
+            
+            toggle_func = lambda e, k=method_key: self._toggle_method(k)
+            container.bind("<Button-1>", toggle_func)
+            canvas.bind("<Button-1>", toggle_func)
+            lbl.bind("<Button-1>", toggle_func)
+
+    def _toggle_method(self, method_key: str):
+        self.enabled_methods[method_key] = not self.enabled_methods[method_key]
+        if getattr(self, 'last_analysis_result', None) is not None:
+            self._update_feedback_ui(self.last_analysis_result)
+        else:
+            self._update_method_lights(None)
+
+    def _update_method_lights(self, result: Optional[FrameAnalysisResult]):
+        for key, canvas in self.method_lights.items():
+            if not self.enabled_methods.get(key, True):
+                canvas.itemconfig("light", fill="dim gray")
+            elif result is None:
+                canvas.itemconfig("light", fill="gray")
+            else:
+                is_bad = False
+                has_data = False
+                if key == 'frf_fft' and result.overall_is_hf is not None:
+                    is_bad = result.overall_is_hf
+                    has_data = True
+                elif key == 'frf_lp' and result.overall_lowpass_bad is not None:
+                    is_bad = result.overall_lowpass_bad
+                    has_data = True
+                elif key == 'psd_fft' and result.psd_overall_is_hf is not None:
+                    is_bad = result.psd_overall_is_hf
+                    has_data = True
+                elif key == 'psd_lp' and result.psd_overall_lowpass_bad is not None:
+                    is_bad = result.psd_overall_lowpass_bad
+                    has_data = True
+                    
+                if has_data:
+                    canvas.itemconfig("light", fill="red" if is_bad else "green")
+                else:
+                    canvas.itemconfig("light", fill="gray")
 
     def update_feedback_panel(self, result: FrameAnalysisResult):
         self.root.after(0, self._update_feedback_ui, result)
         
     def _update_feedback_ui(self, result: FrameAnalysisResult):
+        self.last_analysis_result = result
         # --- Classification status light (uses combined FRF+PSD logic) ---
         if result.overall_is_hf is not None or result.psd_overall_is_hf is not None:
-            classification, color = self.monitor.classify_hit(result)
+            enabled = getattr(self, 'enabled_methods', None)
+            classification, color = self.monitor.classify_hit(result, enabled_methods=enabled)
             self.class_var.set(f"Overall: {classification}")
             self.status_light.config(bg=color)
+
+        if hasattr(self, '_update_method_lights'):
+            self._update_method_lights(result)
 
         # --- FRF readout ---
         if result.avg_energy_ratio is not None:
@@ -4643,8 +4897,14 @@ class MonitorControlGUI:
         # In calibration mode, notify the calibration panel of new signal
         if self.calibration_mode and hasattr(self, 'cal_pending_signal'):
             self._cal_on_new_signal(lightweight_data)
+        # In live analysis mode, notify the live calibration buttons
+        elif not self.calibration_mode and hasattr(self, 'live_cal_pending_signal'):
+            self._live_cal_on_new_signal(lightweight_data)
         
     def _reset_feedback_ui(self):
+        self.last_analysis_result = None
+        if hasattr(self, '_update_method_lights'):
+            self._update_method_lights(None)
         self.class_var.set("Overall: --")
         self.status_light.config(bg="gray")
         self.hf_ratio_var.set("FFT Ratio (FRF): --")
@@ -4707,16 +4967,6 @@ class MonitorControlGUI:
         self._update_manual_points_state()
         self._sync_param_ui_from_config()  # Sync parameter UI
 
-    def _sync_param_ui_from_config(self):
-        """Sync parameter UI variables from current monitor config."""
-        cfg = self.monitor.app_config
-        self.param_vars['fft_cutoff_frequency'].set(cfg.fft_cutoff_frequency)
-        self.param_vars['fft_energy_ratio_threshold'].set(cfg.fft_energy_ratio_threshold)
-        self.param_vars['lowpass_cutoff'].set(cfg.lowpass_cutoff)
-        self.param_vars['lowpass_filter_order'].set(cfg.lowpass_filter_order)
-        self.param_vars['residual_threshold'].set(cfg.residual_threshold)
-        self.param_vars['exceedance_ratio_threshold'].set(cfg.exceedance_ratio_threshold)
-    
     def _launch_config_tool(self):
         self.root.iconify()
 
@@ -4815,18 +5065,34 @@ class MonitorControlGUI:
                                         command=self._finish_calibration)
         self.cal_finish_btn.pack(side=tk.RIGHT, padx=2)
 
+        cal_clear_btn = tk.Button(row2, text="Clear Cal.",
+                                  font=("Segoe UI", 8),
+                                  bg="#95A5A6", fg="white",
+                                  command=self._clear_calibration)
+        cal_clear_btn.pack(side=tk.RIGHT, padx=2)
+
         # Initialize param_vars so _apply_params_live doesn't crash
+        cfg = self.monitor.app_config
         self.param_vars = {
-            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
-            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
-            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
-            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
-            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
+            'fft_cutoff_frequency': tk.DoubleVar(value=cfg.fft_cutoff_frequency),
+            'fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.fft_energy_ratio_threshold),
+            'lowpass_cutoff': tk.DoubleVar(value=cfg.lowpass_cutoff),
+            'lowpass_filter_order': tk.IntVar(value=cfg.lowpass_filter_order),
+            'residual_threshold': tk.DoubleVar(value=cfg.residual_threshold),
+            'exceedance_ratio_threshold': tk.DoubleVar(value=cfg.exceedance_ratio_threshold),
+            'psd_fft_cutoff_frequency': tk.DoubleVar(value=cfg.psd_fft_cutoff_frequency),
+            'psd_fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.psd_fft_energy_ratio_threshold),
+            'psd_lowpass_cutoff': tk.DoubleVar(value=cfg.psd_lowpass_cutoff),
+            'psd_lowpass_filter_order': tk.IntVar(value=cfg.psd_lowpass_filter_order),
+            'psd_residual_threshold': tk.DoubleVar(value=cfg.psd_residual_threshold),
+            'psd_exceedance_ratio_threshold': tk.DoubleVar(value=cfg.psd_exceedance_ratio_threshold)
         }
 
     def _cal_on_new_signal(self, lightweight_data: LightweightHitData):
         """Called when a new signal arrives in calibration mode — enable buttons."""
+        if lightweight_data.signal_type.lower() not in ('frf', 'psd'):
+            return
+            
         self.cal_pending_signal = lightweight_data
         self.cal_good_btn.config(state=tk.NORMAL)
         self.cal_bad_btn.config(state=tk.NORMAL)
@@ -5045,6 +5311,70 @@ class MonitorControlGUI:
 
         return False, None
 
+    def _clear_calibration(self):
+        """Reset calibration engine and revert to default parameters."""
+        answer = messagebox.askyesno(
+            "Clear Calibration Data",
+            "This will delete all calibration signals and revert to default parameters.\n\n"
+            "The ROI configuration will be kept.\n\n"
+            "Continue?",
+            parent=self.root
+        )
+        if not answer:
+            return
+
+        # Reset engine
+        self.calibration_engine = HybridCalibrationEngine()
+
+        # Reset counters if in calibration mode
+        if hasattr(self, 'cal_good_count'):
+            self.cal_good_count = 0
+            self.cal_bad_count = 0
+            self.cal_pending_signal = None
+        if hasattr(self, 'cal_counter_label') and self.cal_counter_label.winfo_exists():
+            self.cal_counter_label.config(text="0G / 0B (need 3+3)")
+        if hasattr(self, 'cal_status_label') and self.cal_status_label.winfo_exists():
+            self.cal_status_label.config(text="Calibration cleared — waiting for signals...")
+        if hasattr(self, 'cal_finish_btn') and self.cal_finish_btn.winfo_exists():
+            self.cal_finish_btn.config(state=tk.DISABLED)
+
+        # Revert config to defaults
+        cfg = self.monitor.app_config
+        cfg.fft_cutoff_frequency = 0.07
+        cfg.fft_energy_ratio_threshold = 0.006
+        cfg.lowpass_cutoff = 0.07
+        cfg.lowpass_filter_order = 7
+        cfg.residual_threshold = 0.005
+        cfg.exceedance_ratio_threshold = 0.7
+        cfg.psd_fft_cutoff_frequency = 0.07
+        cfg.psd_fft_energy_ratio_threshold = 0.006
+        cfg.psd_lowpass_cutoff = 0.07
+        cfg.psd_lowpass_filter_order = 7
+        cfg.psd_residual_threshold = 0.005
+        cfg.psd_exceedance_ratio_threshold = 0.7
+
+        # Update GUI
+        if hasattr(self, 'param_vars'):
+            self._sync_param_ui_from_config()
+
+        # Update status bar
+        self._update_calibration_status(0, 0)
+
+        # Remove _calibration from config file
+        config_path = self.config_path.get()
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config_data = json.load(f)
+                if '_calibration' in config_data:
+                    del config_data['_calibration']
+                    with open(config_path, 'w') as f:
+                        json.dump(config_data, f, indent=2)
+            except Exception as e:
+                logger.warning(f"[CAL] Could not clear calibration from config: {e}")
+
+        logger.info("[CAL] Calibration data cleared — reverted to default parameters")
+
     def _finish_calibration(self):
         """Transition from calibration to normal monitoring with calibrated params."""
         engine = self.calibration_engine
@@ -5123,71 +5453,218 @@ class MonitorControlGUI:
         self.param_vars['lowpass_filter_order'].set(cfg.lowpass_filter_order)
         self.param_vars['residual_threshold'].set(cfg.residual_threshold)
         self.param_vars['exceedance_ratio_threshold'].set(cfg.exceedance_ratio_threshold)
+        self.param_vars['psd_fft_cutoff_frequency'].set(cfg.psd_fft_cutoff_frequency)
+        self.param_vars['psd_fft_energy_ratio_threshold'].set(cfg.psd_fft_energy_ratio_threshold)
+        self.param_vars['psd_lowpass_cutoff'].set(cfg.psd_lowpass_cutoff)
+        self.param_vars['psd_lowpass_filter_order'].set(cfg.psd_lowpass_filter_order)
+        self.param_vars['psd_residual_threshold'].set(cfg.psd_residual_threshold)
+        self.param_vars['psd_exceedance_ratio_threshold'].set(cfg.psd_exceedance_ratio_threshold)
 
     def _setup_analysis_params(self, parent):
-        """Create the Analysis Parameters (Live Tuning) frame."""
+        """Create the Analysis Parameters (Live Tuning) frame with live calibration controls."""
         params_outer_frame = ttk.LabelFrame(parent, text="Analysis Parameters (Live)")
         params_outer_frame.pack(fill=tk.X, pady=(10, 0))
 
+        cfg = self.monitor.app_config
         self.param_vars = {
-            'fft_cutoff_frequency': tk.DoubleVar(value=self.monitor.app_config.fft_cutoff_frequency),
-            'fft_energy_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.fft_energy_ratio_threshold),
-            'lowpass_cutoff': tk.DoubleVar(value=self.monitor.app_config.lowpass_cutoff),
-            'lowpass_filter_order': tk.IntVar(value=self.monitor.app_config.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=self.monitor.app_config.residual_threshold),
-            'exceedance_ratio_threshold': tk.DoubleVar(value=self.monitor.app_config.exceedance_ratio_threshold)
+            'fft_cutoff_frequency': tk.DoubleVar(value=cfg.fft_cutoff_frequency),
+            'fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.fft_energy_ratio_threshold),
+            'lowpass_cutoff': tk.DoubleVar(value=cfg.lowpass_cutoff),
+            'lowpass_filter_order': tk.IntVar(value=cfg.lowpass_filter_order),
+            'residual_threshold': tk.DoubleVar(value=cfg.residual_threshold),
+            'exceedance_ratio_threshold': tk.DoubleVar(value=cfg.exceedance_ratio_threshold),
+            'psd_fft_cutoff_frequency': tk.DoubleVar(value=cfg.psd_fft_cutoff_frequency),
+            'psd_fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.psd_fft_energy_ratio_threshold),
+            'psd_lowpass_cutoff': tk.DoubleVar(value=cfg.psd_lowpass_cutoff),
+            'psd_lowpass_filter_order': tk.IntVar(value=cfg.psd_lowpass_filter_order),
+            'psd_residual_threshold': tk.DoubleVar(value=cfg.psd_residual_threshold),
+            'psd_exceedance_ratio_threshold': tk.DoubleVar(value=cfg.psd_exceedance_ratio_threshold)
         }
 
-        # FFT Parameters row
-        fft_frame = ttk.Frame(params_outer_frame)
-        fft_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(fft_frame, text="FFT Cutoff:", width=12).pack(side=tk.LEFT)
-        fft_cutoff_spin = ttk.Spinbox(fft_frame, from_=0.01, to=0.5, increment=0.01,
-                                      textvariable=self.param_vars['fft_cutoff_frequency'],
-                                      width=7, command=self._apply_params_live)
-        fft_cutoff_spin.pack(side=tk.LEFT, padx=2)
-        fft_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+        # FRF Method Section
+        frf_frame = ttk.LabelFrame(params_outer_frame, text="FRF Method")
+        frf_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._build_param_row(frf_frame, "")
 
-        ttk.Label(fft_frame, text="E.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        fft_ratio_spin = ttk.Spinbox(fft_frame, from_=0.001, to=0.5, increment=0.001,
-                                     textvariable=self.param_vars['fft_energy_ratio_threshold'],
-                                     width=7, command=self._apply_params_live)
-        fft_ratio_spin.pack(side=tk.LEFT, padx=2)
-        fft_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+        # PSD Method Section
+        psd_frame = ttk.LabelFrame(params_outer_frame, text="PSD Method")
+        psd_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._build_param_row(psd_frame, "psd_")
 
-        # Lowpass Parameters row
-        lp_frame = ttk.Frame(params_outer_frame)
-        lp_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(lp_frame, text="LP Cutoff:", width=12).pack(side=tk.LEFT)
-        lp_cutoff_spin = ttk.Spinbox(lp_frame, from_=0.01, to=0.5, increment=0.01,
-                                     textvariable=self.param_vars['lowpass_cutoff'],
-                                     width=7, command=self._apply_params_live)
-        lp_cutoff_spin.pack(side=tk.LEFT, padx=2)
-        lp_cutoff_spin.bind('<Return>', lambda e: self._apply_params_live())
+        # Apply Parameters Button
+        apply_btn = tk.Button(params_outer_frame, text="Apply Parameters",
+                              font=("Segoe UI", 9, "bold"),
+                              bg="#3498DB", fg="white",
+                              command=self._apply_params_live)
+        apply_btn.pack(fill=tk.X, padx=5, pady=5)
 
-        ttk.Label(lp_frame, text="Order:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        lp_order_spin = ttk.Spinbox(lp_frame, from_=1, to=10, increment=1,
-                                    textvariable=self.param_vars['lowpass_filter_order'],
-                                    width=4, command=self._apply_params_live)
-        lp_order_spin.pack(side=tk.LEFT, padx=2)
-        lp_order_spin.bind('<Return>', lambda e: self._apply_params_live())
+        # Live Calibration Controls
+        live_cal_frame = ttk.LabelFrame(params_outer_frame, text="Live Calibration")
+        live_cal_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        # Residual Parameters row
-        res_frame = ttk.Frame(params_outer_frame)
-        res_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(res_frame, text="Res.Thr:", width=12).pack(side=tk.LEFT)
-        res_thr_spin = ttk.Spinbox(res_frame, from_=0.0001, to=0.1, increment=0.0005,
-                                   textvariable=self.param_vars['residual_threshold'],
-                                   width=8, format="%.4f", command=self._apply_params_live)
-        res_thr_spin.pack(side=tk.LEFT, padx=2)
-        res_thr_spin.bind('<Return>', lambda e: self._apply_params_live())
+        btn_row = ttk.Frame(live_cal_frame)
+        btn_row.pack(fill=tk.X, padx=5, pady=3)
 
-        ttk.Label(res_frame, text="Exc.Ratio:", width=8).pack(side=tk.LEFT, padx=(10, 0))
-        exc_ratio_spin = ttk.Spinbox(res_frame, from_=0.01, to=0.99, increment=0.01,
-                                     textvariable=self.param_vars['exceedance_ratio_threshold'],
-                                     width=7, command=self._apply_params_live)
-        exc_ratio_spin.pack(side=tk.LEFT, padx=2)
-        exc_ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+        self.live_cal_good_btn = tk.Button(btn_row, text="\u2713 Good", font=("Segoe UI", 9, "bold"),
+                                           bg="#27AE60", fg="white", width=7, state=tk.DISABLED,
+                                           command=lambda: self._live_cal_classify("GOOD"))
+        self.live_cal_good_btn.pack(side=tk.LEFT, padx=2)
+
+        self.live_cal_bad_btn = tk.Button(btn_row, text="\u2717 Bad", font=("Segoe UI", 9, "bold"),
+                                          bg="#E74C3C", fg="white", width=7, state=tk.DISABLED,
+                                          command=lambda: self._live_cal_classify("BAD"))
+        self.live_cal_bad_btn.pack(side=tk.LEFT, padx=2)
+
+        self.live_cal_status = ttk.Label(btn_row, text="Waiting for signal...",
+                                         font=("Segoe UI", 8, "italic"))
+        self.live_cal_status.pack(side=tk.LEFT, padx=(8, 2))
+
+        clear_btn = tk.Button(btn_row, text="Clear Cal.",
+                              font=("Segoe UI", 8),
+                              bg="#95A5A6", fg="white",
+                              command=self._clear_calibration)
+        clear_btn.pack(side=tk.RIGHT, padx=2)
+
+        self.live_cal_pending_signal = None
+
+    def _build_param_row(self, parent, prefix: str):
+        """Helper to build 6 parameter spinboxes inside a given frame."""
+        # Row 1: FFT Cutoff, Energy Ratio Threshold
+        row1 = ttk.Frame(parent)
+        row1.pack(fill=tk.X, padx=5, pady=2)
+        
+        ttk.Label(row1, text="FFT Cutoff:", width=10).pack(side=tk.LEFT)
+        fft_spin = ttk.Spinbox(row1, from_=0.001, to=0.49, increment=0.005,
+                               textvariable=self.param_vars[f'{prefix}fft_cutoff_frequency'],
+                               width=10, format="%.6f", command=self._apply_params_live)
+        fft_spin.pack(side=tk.LEFT, padx=2)
+        fft_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(row1, text="E.Ratio Thr:", width=10).pack(side=tk.LEFT, padx=(5, 0))
+        ratio_spin = ttk.Spinbox(row1, from_=0.0001, to=0.50, increment=0.001,
+                                 textvariable=self.param_vars[f'{prefix}fft_energy_ratio_threshold'],
+                                 width=10, format="%.6f", command=self._apply_params_live)
+        ratio_spin.pack(side=tk.LEFT, padx=2)
+        ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Row 2: Lowpass Cutoff, Lowpass Filter Order
+        row2 = ttk.Frame(parent)
+        row2.pack(fill=tk.X, padx=5, pady=2)
+        
+        ttk.Label(row2, text="LP Cutoff:", width=10).pack(side=tk.LEFT)
+        lp_spin = ttk.Spinbox(row2, from_=0.001, to=0.49, increment=0.005,
+                              textvariable=self.param_vars[f'{prefix}lowpass_cutoff'],
+                              width=10, format="%.6f", command=self._apply_params_live)
+        lp_spin.pack(side=tk.LEFT, padx=2)
+        lp_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(row2, text="Order:", width=10).pack(side=tk.LEFT, padx=(5, 0))
+        order_spin = ttk.Spinbox(row2, from_=1, to=15, increment=1,
+                                 textvariable=self.param_vars[f'{prefix}lowpass_filter_order'],
+                                 width=10, command=self._apply_params_live)
+        order_spin.pack(side=tk.LEFT, padx=2)
+        order_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        # Row 3: Residual Threshold, Exceedance Ratio Threshold
+        row3 = ttk.Frame(parent)
+        row3.pack(fill=tk.X, padx=5, pady=2)
+        
+        ttk.Label(row3, text="Res.Thr:", width=10).pack(side=tk.LEFT)
+        res_spin = ttk.Spinbox(row3, from_=0.00001, to=1.0, increment=0.0005,
+                               textvariable=self.param_vars[f'{prefix}residual_threshold'],
+                               width=10, format="%.6f", command=self._apply_params_live)
+        res_spin.pack(side=tk.LEFT, padx=2)
+        res_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+        ttk.Label(row3, text="Exc.Ratio:", width=10).pack(side=tk.LEFT, padx=(5, 0))
+        exc_spin = ttk.Spinbox(row3, from_=0.01, to=0.99, increment=0.01,
+                               textvariable=self.param_vars[f'{prefix}exceedance_ratio_threshold'],
+                               width=10, format="%.4f", command=self._apply_params_live)
+        exc_spin.pack(side=tk.LEFT, padx=2)
+        exc_spin.bind('<Return>', lambda e: self._apply_params_live())
+
+    def _live_cal_on_new_signal(self, lightweight_data: LightweightHitData):
+        """Called when a new signal arrives in live analysis mode — enable Good/Bad buttons."""
+        if lightweight_data.signal_type.lower() not in ('frf', 'psd'):
+            return
+        if not hasattr(self, 'live_cal_good_btn'):
+            return
+
+        self.live_cal_pending_signal = lightweight_data
+        self.live_cal_good_btn.config(state=tk.NORMAL)
+        self.live_cal_bad_btn.config(state=tk.NORMAL)
+        sig_type = lightweight_data.signal_type.upper()
+        self.live_cal_status.config(text=f"[{sig_type}] Classify to refine calibration")
+
+    def _live_cal_classify(self, judgment: str):
+        """Handle Good/Bad button click in live analysis mode to continue calibration."""
+        if not hasattr(self, 'live_cal_pending_signal') or self.live_cal_pending_signal is None:
+            return
+
+        sig = self.live_cal_pending_signal
+        self.live_cal_pending_signal = None
+
+        # Disable buttons until next signal
+        self.live_cal_good_btn.config(state=tk.DISABLED)
+        self.live_cal_bad_btn.config(state=tk.DISABLED)
+
+        # Check signal similarity
+        is_similar, similar_idx = self._check_signal_similarity(sig)
+        if is_similar:
+            answer = messagebox.askyesno(
+                "Similar Signal Detected",
+                f"This signal is very similar to calibration signal #{similar_idx + 1}.\n\n"
+                "Classify anyway?",
+                parent=self.root
+            )
+            if not answer:
+                self.live_cal_status.config(text="Signal skipped (too similar)")
+                return
+
+        # Build signal data dict
+        signal_data = {
+            'signal_physical': sig.signal_physical,
+            'fft_freqs': sig.fft_freqs,
+            'fft_mags': sig.fft_mags,
+            'residual_physical': sig.residual_physical,
+            'energy_ratio': sig.energy_ratio,
+            'exceedance_ratio': sig.exceedance_ratio,
+            'exceedance_count': sig.exceedance_count,
+            'total_energy': sig.total_energy,
+            'high_freq_energy': sig.high_freq_energy,
+            'roi_name': sig.hit_key,
+            'signal_type': sig.signal_type,
+            'source': 'live_monitoring',
+        }
+
+        # Feed to calibration engine
+        self.calibration_engine.add_signal(signal_data, judgment)
+
+        total = self.calibration_engine.total_signals
+        level = self.calibration_engine.confidence_level
+
+        logger.info(f"[CAL-LIVE] Signal {sig.hit_key} classified as {judgment} "
+                    f"(E.Ratio={sig.energy_ratio:.4f}) "
+                    f"[{self.calibration_engine.good_count}G + "
+                    f"{self.calibration_engine.bad_count}B = {total}, Level {level}]")
+
+        # Update params if we can estimate
+        if self.calibration_engine.can_estimate:
+            estimates = self.calibration_engine.get_estimates()
+            if estimates:
+                self._apply_calibrated_params(estimates)
+                self.live_cal_status.config(
+                    text=f"Level {level} — {total} signals — params updated"
+                )
+        else:
+            self.live_cal_status.config(text=f"{judgment} — {total} signals (need 3+3)")
+
+        # Update calibration status bar
+        self._update_calibration_status(level, total)
+
+        # Auto-save calibration data periodically
+        if total > 0 and total % 3 == 0:
+            self._save_calibration_to_config()
 
     def _toggle_monitoring(self):
         if self.is_monitoring.get():

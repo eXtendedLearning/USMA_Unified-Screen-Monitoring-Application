@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.9.1
+# USMA (Unified Screen Monitoring Application) — v0.9.2
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
@@ -168,14 +168,27 @@ This means:
 
 ## Version History
 
-### v0.9.1 — Calibration Engine Release *(current)*
+### v0.9.2 — UI Polish & Classification Controls *(current)*
 
-- **HybridCalibrationEngine** — three-method statistical engine: Percentile Boundary, Bayesian Grid Posterior, ROC/Youden J-statistic
-- **Automatic parameter estimation** — calibrated thresholds applied after each classified signal (6+ signals required)
-- **5-level progressive confidence** — methods activate as data accumulates (Percentile → Bayesian → ROC cross-validation)
-- **Calibration persistence** — engine state saved to config JSON `_calibration` section; reloaded on next launch
-- **Signal similarity detection** — NCC + FFT cosine similarity warns when calibration signals are too alike
-- **Cross-validation with outlier rejection** — at Level 3+, estimator disagreements resolved by dropping outliers
+- **Coherence Decoupled** — coherence signals informational only, excluded from calibration & classification
+- **Dual Parameter Panels** — independent manual tuning for FRF and PSD analysis
+- **UI Fixes** — robust spinbox constraints and appropriate sizing
+- **Classification Lights** — Live feedback lights for sub-methods (FRF-FFT, FRF-LP, PSD-FFT, PSD-LP)
+- **Method Toggling** — click lights to dynamically enable/disable classification sub-methods
+- **Resizable Panels** — adjustable sash between graph viewer and console output
+- **Version strings unified** — all window titles, log messages, and UNV exports now reference `APP_VERSION`
+- **Configurable monitor index** — screen capture target is now a config field (`monitor_index`) with UI selector and bounds-check fallback; defaults to primary monitor (index 1)
+- **Improved OCR change detection** — replaced single-mean hash with mean + std + 4×4 spatial signature; catches subtle text changes like "Run 1" → "Run 2"
+- **Standalone config loader** — `load_app_config()` function replaces heavyweight `ScreenMonitor` instantiation for config loading in the Config Tool
+- **Monitoring loop backoff** — exponential backoff (1→30 s) on persistent errors with auto-stop after 20 consecutive failures
+- **`AppConfig.from_json()` classmethod** — config loading as a classmethod on `AppConfig`; `load_app_config()` delegates to it
+- **`slots=True` on hot-path dataclasses** — `FRFAnalysisResult`, `LightweightHitData`, `CoherenceAnalysisResult`, `LightweightCoherenceData`, `FrameAnalysisResult` now use `__slots__` for lower memory and faster attribute access
+- **Batched `gc.collect()`** — matplotlib figure cleanup runs GC every 5 figures instead of every figure; final GC on `stop()`
+- **Clear Calibration** — button in both calibration and live analysis to reset calibration data while keeping ROI config
+- **Live Calibration buttons** — Good/Bad buttons in the Analysis Parameters panel for continued calibration during normal monitoring
+- **Portable launcher fix** — `.bat` version extraction now reads from line 20 of `monitor_app.py`
+
+### v0.9.1 — Calibration Engine Release
 
 ### v0.9.0 — Calibration Wizard Release
 
