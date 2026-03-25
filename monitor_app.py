@@ -78,6 +78,7 @@ except ImportError:
 
 import pyautogui  # Keep as fallback
 import threading
+import queue
 import json
 import os
 import logging
@@ -233,6 +234,15 @@ class PointsInfo:
     hammer_dir: str = "-Z"
     response_point: str = "P1"
     response_dir: str = "-Z"
+
+@dataclass
+class MonitorEvent:
+    """Thread-safe event passed from monitoring thread to GUI thread via queue."""
+    event_type: str  # "frame_update", "hit_detected", "error", "stopped"
+    frame_result: Optional['FrameAnalysisResult'] = None
+    lightweight_data: Optional['LightweightHitData'] = None
+    run_history: Optional[Dict] = None
+    error_message: Optional[str] = None
 
 @dataclass
 class MonitoringRegion:
@@ -968,30 +978,96 @@ class FrameAnalysisResult:
     coherence_results: Dict[str, CoherenceAnalysisResult] = field(default_factory=dict)
     current_averages: Optional[int] = None
 
-@dataclass
-class AppConfig:
-    regions: Dict[str, MonitoringRegion] = field(default_factory=dict)
-    hsv_lower: List[int] = field(default_factory=lambda: [0, 0, 0])
-    hsv_upper: List[int] = field(default_factory=lambda: [179, 255, 240])
-    screenshot_interval: float = 0.25
+@dataclass(slots=True)
+class AnalysisParams:
+    """Analysis parameters for a single signal type (FRF, PSD, etc.)."""
     fft_cutoff_frequency: float = 0.07
     fft_energy_ratio_threshold: float = 0.006
     lowpass_cutoff: float = 0.07
     lowpass_filter_order: int = 7
     residual_threshold: float = 0.005
     exceedance_ratio_threshold: float = 0.7
-    # --- PSD Parameters (v0.6.0) — same defaults as FRF; tuned independently ---
-    psd_fft_cutoff_frequency: float = 0.07
-    psd_fft_energy_ratio_threshold: float = 0.006
-    psd_lowpass_cutoff: float = 0.07
-    psd_lowpass_filter_order: int = 7
-    psd_residual_threshold: float = 0.005
-    psd_exceedance_ratio_threshold: float = 0.7
+
+@dataclass
+class AppConfig:
+    regions: Dict[str, MonitoringRegion] = field(default_factory=dict)
+    hsv_lower: List[int] = field(default_factory=lambda: [0, 0, 0])
+    hsv_upper: List[int] = field(default_factory=lambda: [179, 255, 240])
+    screenshot_interval: float = 0.25
+    
+    # Per-signal-type analysis parameters
+    analysis_params: Dict[str, AnalysisParams] = field(default_factory=lambda: {
+        'frf': AnalysisParams(),
+        'psd': AnalysisParams(),
+    })
+
     # --- Coherence Parameters (v0.6.0) ---
     coherence_threshold: float = 0.3          # Normalized badness threshold
     coherence_degradation_pct: float = 0.20   # % increase in badness to flag degradation
     hits_per_run: int = 5                     # Expected number of hits per run
     monitor_index: int = 1                    # mss monitor index: 0=all, 1=primary, 2+=secondary
+
+    # --- Backward-compatible accessors (FRF) ---
+    @property
+    def fft_cutoff_frequency(self): return self.analysis_params['frf'].fft_cutoff_frequency
+    @fft_cutoff_frequency.setter
+    def fft_cutoff_frequency(self, v): self.analysis_params['frf'].fft_cutoff_frequency = v
+    
+    @property
+    def fft_energy_ratio_threshold(self): return self.analysis_params['frf'].fft_energy_ratio_threshold
+    @fft_energy_ratio_threshold.setter
+    def fft_energy_ratio_threshold(self, v): self.analysis_params['frf'].fft_energy_ratio_threshold = v
+    
+    @property
+    def lowpass_cutoff(self): return self.analysis_params['frf'].lowpass_cutoff
+    @lowpass_cutoff.setter
+    def lowpass_cutoff(self, v): self.analysis_params['frf'].lowpass_cutoff = v
+    
+    @property
+    def lowpass_filter_order(self): return self.analysis_params['frf'].lowpass_filter_order
+    @lowpass_filter_order.setter
+    def lowpass_filter_order(self, v): self.analysis_params['frf'].lowpass_filter_order = v
+    
+    @property
+    def residual_threshold(self): return self.analysis_params['frf'].residual_threshold
+    @residual_threshold.setter
+    def residual_threshold(self, v): self.analysis_params['frf'].residual_threshold = v
+    
+    @property
+    def exceedance_ratio_threshold(self): return self.analysis_params['frf'].exceedance_ratio_threshold
+    @exceedance_ratio_threshold.setter
+    def exceedance_ratio_threshold(self, v): self.analysis_params['frf'].exceedance_ratio_threshold = v
+
+    # --- Backward-compatible accessors (PSD) ---
+    @property
+    def psd_fft_cutoff_frequency(self): return self.analysis_params['psd'].fft_cutoff_frequency
+    @psd_fft_cutoff_frequency.setter
+    def psd_fft_cutoff_frequency(self, v): self.analysis_params['psd'].fft_cutoff_frequency = v
+    
+    @property
+    def psd_fft_energy_ratio_threshold(self): return self.analysis_params['psd'].fft_energy_ratio_threshold
+    @psd_fft_energy_ratio_threshold.setter
+    def psd_fft_energy_ratio_threshold(self, v): self.analysis_params['psd'].fft_energy_ratio_threshold = v
+    
+    @property
+    def psd_lowpass_cutoff(self): return self.analysis_params['psd'].lowpass_cutoff
+    @psd_lowpass_cutoff.setter
+    def psd_lowpass_cutoff(self, v): self.analysis_params['psd'].lowpass_cutoff = v
+    
+    @property
+    def psd_lowpass_filter_order(self): return self.analysis_params['psd'].lowpass_filter_order
+    @psd_lowpass_filter_order.setter
+    def psd_lowpass_filter_order(self, v): self.analysis_params['psd'].lowpass_filter_order = v
+    
+    @property
+    def psd_residual_threshold(self): return self.analysis_params['psd'].residual_threshold
+    @psd_residual_threshold.setter
+    def psd_residual_threshold(self, v): self.analysis_params['psd'].residual_threshold = v
+    
+    @property
+    def psd_exceedance_ratio_threshold(self): return self.analysis_params['psd'].exceedance_ratio_threshold
+    @psd_exceedance_ratio_threshold.setter
+    def psd_exceedance_ratio_threshold(self, v): self.analysis_params['psd'].exceedance_ratio_threshold = v
 
     @classmethod
     def from_json(cls, path: str) -> 'AppConfig':
@@ -1013,18 +1089,17 @@ class AppConfig:
             config.hsv_lower = metadata.get('hsv_lower', config.hsv_lower)
             config.hsv_upper = metadata.get('hsv_upper', config.hsv_upper)
             config.screenshot_interval = metadata.get('screenshot_interval', config.screenshot_interval)
-            config.fft_cutoff_frequency = metadata.get('fft_cutoff_frequency', config.fft_cutoff_frequency)
-            config.fft_energy_ratio_threshold = metadata.get('fft_energy_ratio_threshold', config.fft_energy_ratio_threshold)
-            config.lowpass_cutoff = metadata.get('lowpass_cutoff', config.lowpass_cutoff)
-            config.lowpass_filter_order = metadata.get('lowpass_filter_order', config.lowpass_filter_order)
-            config.residual_threshold = metadata.get('residual_threshold', config.residual_threshold)
-            config.exceedance_ratio_threshold = metadata.get('exceedance_ratio_threshold', config.exceedance_ratio_threshold)
-            config.psd_fft_cutoff_frequency = metadata.get('psd_fft_cutoff_frequency', config.psd_fft_cutoff_frequency)
-            config.psd_fft_energy_ratio_threshold = metadata.get('psd_fft_energy_ratio_threshold', config.psd_fft_energy_ratio_threshold)
-            config.psd_lowpass_cutoff = metadata.get('psd_lowpass_cutoff', config.psd_lowpass_cutoff)
-            config.psd_lowpass_filter_order = metadata.get('psd_lowpass_filter_order', config.psd_lowpass_filter_order)
-            config.psd_residual_threshold = metadata.get('psd_residual_threshold', config.psd_residual_threshold)
-            config.psd_exceedance_ratio_threshold = metadata.get('psd_exceedance_ratio_threshold', config.psd_exceedance_ratio_threshold)
+            
+            for sig_type in ('frf', 'psd'):
+                prefix = '' if sig_type == 'frf' else f'{sig_type}_'
+                params = config.analysis_params.get(sig_type, AnalysisParams())
+                params.fft_cutoff_frequency = metadata.get(f'{prefix}fft_cutoff_frequency', params.fft_cutoff_frequency)
+                params.fft_energy_ratio_threshold = metadata.get(f'{prefix}fft_energy_ratio_threshold', params.fft_energy_ratio_threshold)
+                params.lowpass_cutoff = metadata.get(f'{prefix}lowpass_cutoff', params.lowpass_cutoff)
+                params.lowpass_filter_order = metadata.get(f'{prefix}lowpass_filter_order', params.lowpass_filter_order)
+                params.residual_threshold = metadata.get(f'{prefix}residual_threshold', params.residual_threshold)
+                params.exceedance_ratio_threshold = metadata.get(f'{prefix}exceedance_ratio_threshold', params.exceedance_ratio_threshold)
+                config.analysis_params[sig_type] = params
             config.coherence_threshold = metadata.get('coherence_threshold', config.coherence_threshold)
             config.coherence_degradation_pct = metadata.get('coherence_degradation_pct', config.coherence_degradation_pct)
             config.hits_per_run = metadata.get('hits_per_run', config.hits_per_run)
@@ -1097,8 +1172,10 @@ class ScreenMonitor:
         self.thread: Optional[threading.Thread] = None
         self.config_path = config_path
         self.app_config = self._load_config(self.config_path)
+        # Callbacks are deprecated, use event_queue instead
         self.update_callback = update_callback
         self.plot_callback = plot_callback
+        self.event_queue = queue.Queue(maxsize=100)
         self.frame_count = 0
         self.verbose_logging_enabled = True
         self.image_logging_enabled = True
@@ -1273,6 +1350,14 @@ class ScreenMonitor:
                 # Reset error counter on successful frame
                 self._consecutive_errors = 0
 
+                try:
+                    self.event_queue.put_nowait(MonitorEvent(
+                        event_type="frame_update",
+                        frame_result=frame_result
+                    ))
+                except queue.Full:
+                    pass
+
                 if self.update_callback:
                     self.update_callback(frame_result)
 
@@ -1312,6 +1397,13 @@ class ScreenMonitor:
                     self.running = False
                     self._stop_audio_feedback()
                     # Notify GUI if callback is available
+                    try:
+                        self.event_queue.put_nowait(MonitorEvent(
+                            event_type="error",
+                            error_message=f"Stopped after {self._consecutive_errors} failures"
+                        ))
+                    except queue.Full:
+                        pass
                     if self.update_callback:
                         try:
                             error_result = FrameAnalysisResult()
@@ -1340,12 +1432,12 @@ class ScreenMonitor:
             all_rois[name] = roi.copy()
             
             if region.roi_type == 'frf':
-                analysis_result = self._analyze_wave_pattern(roi, region)
+                analysis_result = self._analyze_wave_pattern(roi, region, self.app_config.analysis_params['frf'])
                 if analysis_result:
                     frame_result.frf_results[name] = analysis_result
                     frame_result.active_regions[name] = region
             elif region.roi_type == 'psd':
-                psd_analysis = self._analyze_wave_pattern(roi, region, param_prefix='psd_')
+                psd_analysis = self._analyze_wave_pattern(roi, region, self.app_config.analysis_params['psd'])
                 if psd_analysis:
                     frame_result.psd_results[name] = psd_analysis
                     frame_result.active_regions[name] = region
@@ -1594,7 +1686,16 @@ class ScreenMonitor:
                         run=points.run,
                         signal_type="frf"
                     )
-                    self.plot_callback(lightweight_data, self.run_history.copy())
+                    if self.plot_callback:
+                        self.plot_callback(lightweight_data, self.run_history.copy())
+                    try:
+                        self.event_queue.put_nowait(MonitorEvent(
+                            event_type="hit_detected",
+                            lightweight_data=lightweight_data,
+                            run_history=self.run_history.copy()
+                        ))
+                    except queue.Full:
+                        pass
 
             # --- PSD results: fire separate plot_callback with psd_ prefix ---
             for psd_name, psd_result in frame_result.psd_results.items():
@@ -1635,7 +1736,16 @@ class ScreenMonitor:
                         run=points.run,
                         signal_type="psd"
                     )
-                    self.plot_callback(psd_lightweight, self.run_history.copy())
+                    if self.plot_callback:
+                        self.plot_callback(psd_lightweight, self.run_history.copy())
+                    try:
+                        self.event_queue.put_nowait(MonitorEvent(
+                            event_type="hit_detected",
+                            lightweight_data=psd_lightweight,
+                            run_history=self.run_history.copy()
+                        ))
+                    except queue.Full:
+                        pass
 
             # --- Coherence results: fire plot_callback with coherence signal ---
             for coh_name, coh_result in frame_result.coherence_results.items():
@@ -1665,7 +1775,16 @@ class ScreenMonitor:
                         run=points.run,
                         signal_type="coherence"
                     )
-                    self.plot_callback(coh_lightweight, self.run_history.copy())
+                    if self.plot_callback:
+                        self.plot_callback(coh_lightweight, self.run_history.copy())
+                    try:
+                        self.event_queue.put_nowait(MonitorEvent(
+                            event_type="hit_detected",
+                            lightweight_data=coh_lightweight,
+                            run_history=self.run_history.copy()
+                        ))
+                    except queue.Full:
+                        pass
 
     def _handle_continuous_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
         """
@@ -2252,7 +2371,7 @@ class ScreenMonitor:
         self,
         roi: np.ndarray,
         region: MonitoringRegion,
-        param_prefix: str = "",
+        params: AnalysisParams = None,
     ) -> Optional[FRFAnalysisResult]:
         if roi.size == 0:
             return None
@@ -2275,13 +2394,16 @@ class ScreenMonitor:
 
         height = mask.shape[0]
 
-        # --- FFT analysis (uses param_prefix to select FRF or PSD parameters) ---
-        fft_cutoff = getattr(self.app_config, f"{param_prefix}fft_cutoff_frequency")
-        fft_threshold = getattr(self.app_config, f"{param_prefix}fft_energy_ratio_threshold")
-        lp_cutoff = getattr(self.app_config, f"{param_prefix}lowpass_cutoff")
-        lp_order = getattr(self.app_config, f"{param_prefix}lowpass_filter_order")
-        res_threshold = getattr(self.app_config, f"{param_prefix}residual_threshold")
-        exc_threshold = getattr(self.app_config, f"{param_prefix}exceedance_ratio_threshold")
+        if params is None:
+            params = self.app_config.analysis_params.get('frf', AnalysisParams())
+
+        # --- FFT analysis (uses params to select FRF or PSD parameters) ---
+        fft_cutoff = params.fft_cutoff_frequency
+        fft_threshold = params.fft_energy_ratio_threshold
+        lp_cutoff = params.lowpass_cutoff
+        lp_order = params.lowpass_filter_order
+        res_threshold = params.residual_threshold
+        exc_threshold = params.exceedance_ratio_threshold
 
         N = len(signal_pixels)
         detrended_pixels = signal_pixels - np.mean(signal_pixels)
@@ -5666,6 +5788,39 @@ class MonitorControlGUI:
         if total > 0 and total % 3 == 0:
             self._save_calibration_to_config()
 
+    def _poll_monitor_queue(self):
+        if not self.monitor or not getattr(self.monitor, 'running', False):
+            return
+            
+        try:
+            # Process up to 10 events per tick to prevent GUI freeze
+            for _ in range(10):
+                event: MonitorEvent = self.monitor.event_queue.get_nowait()
+                
+                if event.event_type == "frame_update":
+                    frame_res = event.frame_result
+                    if frame_res is not None:
+                        self.update_feedback_panel(frame_res)
+                elif event.event_type == "hit_detected":
+                    lw_data = event.lightweight_data
+                    if lw_data is not None:
+                        self._on_plot_data(lw_data, event.run_history or {})
+                elif event.event_type == "error":
+                    err_msg = event.error_message
+                    if err_msg is not None:
+                        self.status_var.set(f"Stop: {err_msg}")
+                        self.status_label.config(text=f"ERROR: {err_msg}")
+                    self.start_stop_button.config(text="Start Monitoring")
+                    self.is_monitoring.set(False)
+                    self.load_button.config(state=tk.NORMAL)
+                    self.edit_button.config(state=tk.NORMAL)
+        except queue.Empty:
+            pass
+            
+        # Reschedule
+        if self.monitor and getattr(self.monitor, 'running', False):
+            self.root.after(50, self._poll_monitor_queue)
+
     def _toggle_monitoring(self):
         if self.is_monitoring.get():
             self.monitor.stop()
@@ -5714,6 +5869,9 @@ class MonitorControlGUI:
                 self.status_label.config(text="Monitoring active...")
                 self.load_button.config(state=tk.DISABLED)
                 self.edit_button.config(state=tk.DISABLED)
+                
+                # Start polling the event queue
+                self.root.after(50, self._poll_monitor_queue)
 
     def _toggle_overlay(self):
         if self.overlay and self.overlay.winfo_exists():
