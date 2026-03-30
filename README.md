@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.9.2
+# USMA (Unified Screen Monitoring Application) — v0.10.0
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
@@ -19,7 +19,16 @@ Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extra
 ```
 USMA/
 ├── RUN_USMA_PORTABLE.bat   ← Start here
-├── monitor_app.py
+├── monitor_app.py           ← Thin launcher (delegates to usma/)
+├── usma/                    ← Package (v0.10.0 modular architecture)
+│   ├── models.py            ← Data classes, config, calibration engine
+│   ├── monitor.py           ← Screen capture & analysis orchestration
+│   ├── audio.py             ← Audio feedback
+│   ├── calibration.py       ← Calibration re-exports
+│   ├── utils.py             ← Environment setup, logging, helpers
+│   ├── analysis/            ← Signal, OCR, coherence, classifier
+│   ├── export/              ← UNV exporter, image logger
+│   └── gui/                 ← Main window, config tool, dialogs, etc.
 ├── requirements.txt
 ├── python/                  ← Portable Python 3.11.9
 ├── external/tesseract/      ← Portable Tesseract OCR
@@ -168,25 +177,22 @@ This means:
 
 ## Version History
 
-### v0.9.2 — UI Polish & Classification Controls *(current)*
+### v0.10.0 — Package Architecture *(current)*
 
-- **Coherence Decoupled** — coherence signals informational only, excluded from calibration & classification
-- **Dual Parameter Panels** — independent manual tuning for FRF and PSD analysis
-- **UI Fixes** — robust spinbox constraints and appropriate sizing
-- **Classification Lights** — Live feedback lights for sub-methods (FRF-FFT, FRF-LP, PSD-FFT, PSD-LP)
-- **Method Toggling** — click lights to dynamically enable/disable classification sub-methods
-- **Resizable Panels** — adjustable sash between graph viewer and console output
-- **Version strings unified** — all window titles, log messages, and UNV exports now reference `APP_VERSION`
-- **Configurable monitor index** — screen capture target is now a config field (`monitor_index`) with UI selector and bounds-check fallback; defaults to primary monitor (index 1)
-- **Improved OCR change detection** — replaced single-mean hash with mean + std + 4×4 spatial signature; catches subtle text changes like "Run 1" → "Run 2"
-- **Standalone config loader** — `load_app_config()` function replaces heavyweight `ScreenMonitor` instantiation for config loading in the Config Tool
-- **Monitoring loop backoff** — exponential backoff (1→30 s) on persistent errors with auto-stop after 20 consecutive failures
-- **`AppConfig.from_json()` classmethod** — config loading as a classmethod on `AppConfig`; `load_app_config()` delegates to it
-- **`slots=True` on hot-path dataclasses** — `FRFAnalysisResult`, `LightweightHitData`, `CoherenceAnalysisResult`, `LightweightCoherenceData`, `FrameAnalysisResult` now use `__slots__` for lower memory and faster attribute access
-- **Batched `gc.collect()`** — matplotlib figure cleanup runs GC every 5 figures instead of every figure; final GC on `stop()`
-- **Clear Calibration** — button in both calibration and live analysis to reset calibration data while keeping ROI config
-- **Live Calibration buttons** — Good/Bad buttons in the Analysis Parameters panel for continued calibration during normal monitoring
-- **Portable launcher fix** — `.bat` version extraction now reads from line 20 of `monitor_app.py`
+- **Modular package** — monolithic `monitor_app.py` (6000+ lines) refactored into `usma/` package with 15 focused modules
+- **Clean module boundaries** — `models.py`, `monitor.py`, `audio.py`, `calibration.py`, `utils.py`, `analysis/` (signal, ocr, coherence, classifier), `export/` (unv, image_logger), `gui/` (main_window, config_tool, graph_viewer, dialogs, hsv_calibration, overlay)
+- **Backward-compatible launcher** — `monitor_app.py` remains as thin entry point; `RUN_USMA_PORTABLE.bat` unchanged
+- **All v0.9.x features preserved** — calibration engine, dual FRF/PSD analysis, classification lights, resizable panels, OCR caching, exponential backoff
+
+### v0.9.2 — UI Polish & Classification Controls
+
+- Coherence decoupled from calibration & classification (informational only)
+- Dual FRF/PSD analysis parameter panels with independent manual tuning
+- Classification method indicator lights with per-method enable/disable toggle
+- Resizable graph/console panels via draggable sash
+- Clear Calibration button, live Good/Bad buttons in Analysis Parameters
+- Monitoring loop exponential backoff, batched GC, `slots=True` dataclasses
+- Configurable monitor index, improved OCR change detection, standalone config loader
 
 ### v0.9.1 — Calibration Engine Release
 
