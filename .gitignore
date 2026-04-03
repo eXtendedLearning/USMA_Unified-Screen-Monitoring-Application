@@ -29,6 +29,7 @@ signal_logs/
 # READMEs and stuff
 UPDATE.md
 DAILY.md
+TASKS.md
 
 # Temporary Files
 *.tmp
