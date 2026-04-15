@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.10.0
+# USMA (Unified Screen Monitoring Application) — v0.11.0
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 

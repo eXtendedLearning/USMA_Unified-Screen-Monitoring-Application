@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 import cv2
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, sosfiltfilt
 from scipy.fft import rfft, rfftfreq
 
 from usma.models import (
@@ -42,13 +42,13 @@ class SignalAnalyzer:
     def _apply_lowpass_filter(self, signal: np.ndarray) -> np.ndarray:
         if len(signal) < 15:
             return signal.copy()
-    
+
         cutoff = min(self.app_config.lowpass_cutoff, 0.99)
         order = self.app_config.lowpass_filter_order
-    
+
         try:
-            b, a = butter(order, cutoff, btype='low')
-            filtered = filtfilt(b, a, signal)
+            sos = butter(order, cutoff, btype='low', output='sos')
+            filtered = sosfiltfilt(sos, signal)
             return filtered
         except Exception as e:
             logger.warning(f"Lowpass filter failed: {e}. Returning original signal.")
@@ -165,7 +165,7 @@ class SignalAnalyzer:
         fft_threshold = params.fft_energy_ratio_threshold
         lp_cutoff = params.lowpass_cutoff
         lp_order = params.lowpass_filter_order
-        res_threshold = params.residual_threshold
+        rel_ratio = params.relative_residual_ratio
         exc_threshold = params.exceedance_ratio_threshold
 
         N = len(signal_pixels)
@@ -183,29 +183,34 @@ class SignalAnalyzer:
                 energy_ratio = high_freq_energy / total_energy
             is_hf = energy_ratio > fft_threshold
 
-        # --- Lowpass residual analysis ---
-        signal_mean = np.mean(signal_physical)
-        signal_detrended = signal_physical - signal_mean
+        # --- Lowpass residual analysis (pixel-space, relative threshold) ---
+        pixel_mean = np.mean(signal_pixels)
+        pixel_detrended = signal_pixels - pixel_mean
 
-        # Apply lowpass filter using the selected parameter set
-        if len(signal_detrended) < 15:
-            filtered_detrended = signal_detrended.copy()
+        if len(pixel_detrended) < 15:
+            filtered_detrended = pixel_detrended.copy()
         else:
             try:
-                b, a = butter(lp_order, min(lp_cutoff, 0.99), btype="low")
-                filtered_detrended = filtfilt(b, a, signal_detrended)
+                sos = butter(lp_order, min(lp_cutoff, 0.99), btype="low", output="sos")
+                filtered_detrended = sosfiltfilt(sos, pixel_detrended)
             except Exception as e:
                 logger.warning(f"Lowpass filter failed: {e}. Returning original signal.")
-                filtered_detrended = signal_detrended.copy()
+                filtered_detrended = pixel_detrended.copy()
 
-        residual_physical = signal_detrended - filtered_detrended
-        filtered_physical = filtered_detrended + signal_mean
+        residual_pixels = pixel_detrended - filtered_detrended
+        filtered_pixels = filtered_detrended + pixel_mean
+
+        # Relative threshold: ratio × max(|residual|) — dimensionless, scale-invariant
+        max_abs_residual = float(np.max(np.abs(residual_pixels))) if len(residual_pixels) > 0 else 0.0
+        dynamic_threshold = rel_ratio * max_abs_residual if max_abs_residual > 1e-9 else 0.0
 
         exceedance_count, exceedance_ratio = self._calculate_exceedances(
-            residual_physical, res_threshold
+            residual_pixels, dynamic_threshold
         )
         lowpass_is_bad = exceedance_ratio > exc_threshold
 
+        # NOTE: filtered_physical and residual_physical now contain pixel-space data
+        # despite the field names. A rename is planned for a future refactor.
         return FRFAnalysisResult(
             is_high_frequency=is_hf,
             energy_ratio=energy_ratio,
@@ -217,11 +222,13 @@ class SignalAnalyzer:
             color_mask=mask.copy(),
             total_energy=total_energy,
             signal_physical=signal_physical,
-            filtered_physical=filtered_physical,
-            residual_physical=residual_physical,
+            filtered_physical=filtered_pixels,
+            residual_physical=residual_pixels,
             exceedance_count=exceedance_count,
             exceedance_ratio=exceedance_ratio,
             lowpass_is_bad_hit=lowpass_is_bad,
+            max_abs_residual=max_abs_residual,
+            dynamic_threshold=dynamic_threshold,
             y_axis_unit=region.y_axis_unit,
         )
 

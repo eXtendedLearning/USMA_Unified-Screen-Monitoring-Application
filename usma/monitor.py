@@ -544,7 +544,9 @@ class ScreenMonitor:
                         x_axis_max=region.x_axis_max,
                         hit_key=hit_key,
                         run=points.run,
-                        signal_type="frf"
+                        signal_type="frf",
+                        max_abs_residual=frf_result.max_abs_residual,
+                        dynamic_threshold=frf_result.dynamic_threshold,
                     )
                     if self.plot_callback:
                         self.plot_callback(lightweight_data, self.run_history.copy())
@@ -596,7 +598,9 @@ class ScreenMonitor:
                         x_axis_max=region.x_axis_max,
                         hit_key=hit_key_psd,
                         run=points.run,
-                        signal_type="psd"
+                        signal_type="psd",
+                        max_abs_residual=psd_result.max_abs_residual,
+                        dynamic_threshold=psd_result.dynamic_threshold,
                     )
                     if self.plot_callback:
                         self.plot_callback(psd_lightweight, self.run_history.copy())

@@ -1,0 +1,89 @@
+# Relative Residual Ratio
+
+**Parameter:** `relative_residual_ratio` (FRF) /
+`psd_relative_residual_ratio` (PSD)
+**Default:** `0.10` (i.e. 10% of the peak residual)
+**Range:** `0.02 – 0.50`
+
+## What it is
+
+A **dimensionless fraction** in `[0, 1]` (displayed as a ratio in the UI). It
+defines the exceedance threshold as a proportion of the peak residual
+amplitude.
+
+## What it does
+
+```
+max_abs_residual  = max(|residual|)
+dynamic_threshold = relative_residual_ratio * max_abs_residual
+exceedance[i]     = |residual[i]| > dynamic_threshold
+```
+
+A residual sample is counted as an "exceedance" if its absolute value
+exceeds this fraction of the peak residual.
+
+The default `0.10` means: **a sample is an exceedance if it exceeds 10% of
+the largest residual in the signal**.
+
+## Intuition (read carefully)
+
+- **Clean signal:** residuals are uniformly small. `max` is small.
+  `10% of max` is very small. Almost all samples exceed it.
+  `exceedance_ratio ≈ 1.0`. **But this is not flagged** because the
+  `exceedance_ratio_threshold` (default 0.7) is *also* high — both numbers
+  are meant to be interpreted as "proportion of samples that are
+  proportionally close to peak".
+
+- **Double-hit / spiky signal:** residuals have large localised spikes
+  mixed with calm regions. `max` is large (set by the spike). `10% of max`
+  is moderate. Many calm-region samples fall below it.
+  `exceedance_ratio < 0.7`. Also not flagged.
+
+- **Pervasively rough signal:** `max` is high AND most samples are also
+  high. Most samples exceed 10% of max → `exceedance_ratio > 0.7` →
+  **flagged BAD**.
+
+So what this pair of thresholds *really* detects is **pervasive roughness**,
+not isolated spikes or uniform cleanness. That is the design intent.
+
+## Dimensionless and scale-invariant
+
+Because the threshold is a fraction of the signal's own peak residual, the
+LP method works the same way regardless of:
+
+- Signal amplitude range
+- Physical units (g/N, m/s², dimensionless)
+- Y-axis calibration correctness
+
+This is why the LP method is reliable on pixel-space signals without any
+user-supplied calibration of the Y-axis.
+
+## Effect of changing it
+
+- **Lower ratio** (e.g. 0.10 → 0.05) → lower dynamic threshold → more
+  exceedances → **easier to flag BAD**.
+- **Higher ratio** (e.g. 0.10 → 0.20) → higher dynamic threshold → fewer
+  exceedances → **harder to flag**.
+
+## Working with `exceedance_ratio_threshold`
+
+The two knobs are **complementary**. Lower the ratio to find more
+exceedances; lower the exceedance threshold to accept fewer of them as
+"rough enough to fail". In practice, tune `relative_residual_ratio` first
+to shape how residuals are counted, then tune
+`exceedance_ratio_threshold` to set the pass/fail line.
+
+## Calibration
+
+All three estimators target this parameter:
+
+- **Percentile:** sweeps candidate ratios over `[0.02, 0.50]` in steps of
+  0.01 and picks the one with the highest Good/Bad separation.
+- **Bayesian:** grid search over `[0.02, 0.50]`, 300 grid points, sigmoid
+  likelihood.
+- **ROC/Youden:** nested sweep — for each candidate ratio, recompute
+  `exceedance_ratio` for every signal, then find the Youden-J-optimal
+  threshold. The ratio producing the highest J wins.
+
+---
+See also: lowpass_method, exceedance_ratio_threshold, lowpass_cutoff, calibration_engine, practical_tuning

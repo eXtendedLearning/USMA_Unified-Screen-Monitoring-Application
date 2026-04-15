@@ -1,0 +1,60 @@
+# FFT Energy Ratio Threshold
+
+**Parameter:** `fft_energy_ratio_threshold` (FRF) /
+`psd_fft_energy_ratio_threshold` (PSD)
+**Default:** `0.006`
+**Range:** `0.0001 – 0.1` (practical)
+
+## What it is
+
+The minimum `energy_ratio` to flag a signal as high-frequency. Dimensionless,
+ranges roughly `0.001 – 0.1` on real data.
+
+`energy_ratio` is defined (see `fft_cutoff_frequency`) as:
+
+```
+energy_ratio = high_freq_energy / total_energy
+```
+
+…i.e. the fraction of total spectral power sitting above the cutoff.
+
+## What it does
+
+```
+fft_is_bad = energy_ratio > fft_energy_ratio_threshold
+```
+
+If the fraction of total spectral power above the cutoff exceeds this
+threshold, the FFT method votes BAD.
+
+## Why the default is 0.006
+
+0.006 means: if more than 0.6% of the signal's total power is in high spatial
+frequencies, flag it. This is **intentionally sensitive** — a handful of
+pixel-width ripples typically produce energy ratios in the 0.01–0.05 range, so
+anything even mildly noisy will cross this bar.
+
+The default reflects the typical use case: clean FRF/PSD plots from a
+well-coupled impact test. If your baseline measurements are inherently
+noisier (weak signal-to-noise, rough instrumentation), you will need to raise
+the threshold or the FFT method will flag everything.
+
+## Effect of changing it
+
+- **Lower threshold** → FFT method is more sensitive → more signals flagged
+  BAD by the FFT vote.
+- **Higher threshold** → fewer signals flagged → FFT vote only fires on very
+  noisy signals.
+
+## Calibration
+
+All three estimators target this parameter:
+
+- **Percentile:** midpoint between `max(good_values)` and `min(bad_values)`
+  if cleanly separated; else 95th percentile of GOOD.
+- **Bayesian:** grid search over `[0.0005, 0.15]` with a sigmoid likelihood,
+  300 grid points.
+- **ROC/Youden:** threshold maximising Youden's J on the labelled data.
+
+---
+See also: fft_cutoff_frequency, fft_method, calibration_engine, practical_tuning

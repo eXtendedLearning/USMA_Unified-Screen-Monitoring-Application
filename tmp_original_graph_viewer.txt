@@ -1,4 +1,3 @@
-import gc
 import logging
 from typing import Dict, List, Optional
 
@@ -8,11 +7,9 @@ import tkinter as tk
 from tkinter import ttk
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import matplotlib.pyplot as plt
 
-from usma.models import LightweightHitData, AppConfig, HybridCalibrationEngine
+from usma.models import LightweightHitData, AppConfig
 from usma.utils import TextHandler
-from usma.theory.wiki_viewer import show_theory_page
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +18,7 @@ class GraphViewerFrame(ttk.LabelFrame):
     """Embedded matplotlib graph viewer with hit navigation and console output."""
     
     PLOT_TYPES = ['Signal', 'FFT', 'Lowpass Comparison', 'Residual Analysis', 'Run Summary']
-    SIGNAL_SOURCES = ['All', 'FRF', 'PSD', 'Coherence', 'Cal. Diagnostics']
+    SIGNAL_SOURCES = ['All', 'FRF', 'PSD', 'Coherence']
     MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
 
     def __init__(self, parent):
@@ -33,8 +30,7 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.app_config = None
         self.text_handler = None  # Will be set up after console is created
         self.signal_filter = "All"  # Current signal source filter
-        self.calibration_engine: Optional[HybridCalibrationEngine] = None
-
+        
         self._setup_ui()
         
     def _setup_ui(self):
@@ -87,68 +83,54 @@ class GraphViewerFrame(ttk.LabelFrame):
 
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
-
-        # Calibration-diagnostics info row — shown only when the "Cal.
-        # Diagnostics" signal source is selected. Constructed here but not
-        # packed until needed; pack_forget()'d when hidden.
-        self.cal_info_frame = ttk.Frame(self)
-        ttk.Label(self.cal_info_frame,
-                  text="Understanding these plots:",
-                  font=("Segoe UI", 8)).pack(side=tk.LEFT)
-        _cal_info_lbl = tk.Label(self.cal_info_frame, text="\u24D8",
-                                 font=("Segoe UI", 10), fg="#5DADE2",
-                                 cursor="hand2")
-        _cal_info_lbl.bind(
-            "<Button-1>",
-            lambda e: show_theory_page(self.winfo_toplevel(),
-                                       "calibration_engine"),
-        )
-        _cal_info_lbl.pack(side=tk.LEFT, padx=2)
-
-        # Graph area (takes all remaining space)
-        self.figure = Figure(figsize=(6, 4), dpi=100, facecolor='#1E1E1E')
+        
+        # Side-by-side view (Graph left | Console right)
+        content_frame = ttk.Frame(self)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Left side: Graph
+        graph_frame = ttk.LabelFrame(content_frame, text="Live Graph")
+        graph_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        self.figure = Figure(figsize=(6, 3), dpi=100, facecolor='#1E1E1E')
         self.ax = self.figure.add_subplot(111)
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='both', colors='white')
         self.ax.set_title('Waiting for data...', color='white')
-
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        
+        self.canvas = FigureCanvasTkAgg(self.figure, master=graph_frame)
         self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Console is now created externally via setup_console()
-        self.console_text = None
-        self.text_handler = None
-
-        self._update_navigation_state()
-
-    def setup_console(self, parent):
-        """Create the console widget in an external parent frame.
-
-        Called by the main window to place the console in a collapsible panel.
-        """
-        console_inner = ttk.Frame(parent)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Right side: Console
+        console_frame = ttk.LabelFrame(content_frame, text="Console Output")
+        console_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        
+        # Console text widget with scrollbar
+        console_inner = ttk.Frame(console_frame)
         console_inner.pack(fill=tk.BOTH, expand=True)
-
+        
         console_scroll = ttk.Scrollbar(console_inner, orient=tk.VERTICAL)
         console_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
+        
         self.console_text = tk.Text(console_inner, wrap=tk.WORD, bg='#1E1E1E', fg='#00FF00',
                                     font=('Consolas', 9), state='disabled',
-                                    yscrollcommand=console_scroll.set, height=8)
+                                    yscrollcommand=console_scroll.set)
         self.console_text.pack(fill=tk.BOTH, expand=True)
         console_scroll.config(command=self.console_text.yview)
-
+        
+        # Add text handler to logger
         self.text_handler = TextHandler(self.console_text)
         logger.addHandler(self.text_handler)
-
-        clear_btn = ttk.Button(parent, text="Clear", command=self._clear_console)
-        clear_btn.pack(side=tk.RIGHT, padx=2, pady=2)
+        
+        # Clear console button
+        clear_btn = ttk.Button(console_frame, text="Clear Console", command=self._clear_console)
+        clear_btn.pack(pady=2)
+        
+        self._update_navigation_state()
     
     def _clear_console(self):
         """Clear the console text widget."""
-        if self.console_text is None:
-            return
         self.console_text.configure(state='normal')
         self.console_text.delete('1.0', tk.END)
         self.console_text.configure(state='disabled')
@@ -208,8 +190,6 @@ class GraphViewerFrame(ttk.LabelFrame):
     def _matches_filter(self, hit_data: LightweightHitData) -> bool:
         if self.signal_filter == "All":
             return True
-        if self.signal_filter == "Cal. Diagnostics":
-            return False  # Diagnostics view doesn't use hit history
         filter_map = {"FRF": "frf", "PSD": "psd", "Coherence": "coherence"}
         return hit_data.signal_type == filter_map.get(self.signal_filter, "")
 
@@ -264,167 +244,7 @@ class GraphViewerFrame(ttk.LabelFrame):
         self._update_plot()
         self._update_navigation_state()
         
-    def update_calibration_diagnostics(self, engine: HybridCalibrationEngine):
-        """Update calibration engine reference and refresh diagnostic plots if active."""
-        self.calibration_engine = engine
-        if self.signal_filter == "Cal. Diagnostics":
-            self._plot_calibration_diagnostics()
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
-
-    def _plot_calibration_diagnostics(self):
-        """Render calibration diagnostic subplots: distributions, ROC, convergence."""
-        if self.calibration_engine is None:
-            self.figure.clear()
-            ax = self.figure.add_subplot(111)
-            ax.set_facecolor('#2E2E2E')
-            ax.text(0.5, 0.5, 'No calibration data', transform=ax.transAxes,
-                    ha='center', va='center', color='white', fontsize=12)
-            return
-
-        engine = self.calibration_engine
-        dist_data = engine.get_distribution_data()
-        roc_data = engine.get_roc_data()
-        bayesian_ci = engine.get_bayesian_ci()
-
-        # Determine layout: 2x2 if ROC available, else 1x3 distributions + convergence
-        has_roc = roc_data is not None and len(roc_data) > 0
-        has_convergence = engine.total_signals >= 6
-
-        if has_roc:
-            # 2x2: 3 distribution plots + 1 ROC combined
-            self.figure.clear()
-            axes = self.figure.subplots(2, 2)
-            ax_dist = [axes[0, 0], axes[0, 1], axes[1, 0]]
-            ax_extra = axes[1, 1]
-        elif has_convergence:
-            self.figure.clear()
-            axes = self.figure.subplots(2, 2)
-            ax_dist = [axes[0, 0], axes[0, 1], axes[1, 0]]
-            ax_extra = axes[1, 1]
-        else:
-            self.figure.clear()
-            ax_dist = self.figure.subplots(1, 3)
-            ax_extra = None
-
-        # Get current threshold estimates
-        estimates = engine.get_estimates() if engine.can_estimate else {}
-
-        # --- Feature Distribution Plots ---
-        param_labels = [
-            ('fft_energy_ratio', 'FFT Energy Ratio', 'fft_energy_ratio_threshold'),
-            ('exceedance_ratio', 'Exceedance Ratio', 'exceedance_ratio_threshold'),
-            ('relative_residual_ratio', 'Relative Residual Ratio', 'relative_residual_ratio'),
-        ]
-
-        for idx, (key, title, est_key) in enumerate(param_labels):
-            ax = ax_dist[idx]
-            ax.set_facecolor('#2E2E2E')
-            ax.tick_params(axis='both', colors='white', labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_color('white')
-
-            good_vals = dist_data[key]['good']
-            bad_vals = dist_data[key]['bad']
-
-            if good_vals:
-                ax.hist(good_vals, bins=max(5, len(good_vals)//2), alpha=0.6,
-                        color='#2ECC71', label=f'Good ({len(good_vals)})', density=True)
-            if bad_vals:
-                ax.hist(bad_vals, bins=max(5, len(bad_vals)//2), alpha=0.6,
-                        color='#E74C3C', label=f'Bad ({len(bad_vals)})', density=True)
-
-            # Threshold lines from estimators
-            if estimates and est_key in estimates:
-                ax.axvline(estimates[est_key], color='white', linewidth=1.5,
-                           linestyle='-', label='Merged', alpha=0.9)
-
-            # Bayesian credible interval shading
-            if bayesian_ci and est_key in bayesian_ci:
-                ci = bayesian_ci[est_key]
-                ax.axvspan(ci['ci_low'], ci['ci_high'], alpha=0.15, color='#3498DB',
-                           label='95% CI')
-
-            ax.set_title(title, color='white', fontsize=8)
-            ax.set_xlabel(title, color='white', fontsize=7)
-            ax.set_ylabel('Density', color='white', fontsize=7)
-            ax.legend(fontsize=6, facecolor='#2E2E2E', labelcolor='white', loc='upper right')
-            ax.grid(True, linestyle='--', alpha=0.2)
-
-        # --- Extra plot: ROC or Convergence ---
-        if ax_extra is not None:
-            ax_extra.set_facecolor('#2E2E2E')
-            ax_extra.tick_params(axis='both', colors='white', labelsize=7)
-            for spine in ax_extra.spines.values():
-                spine.set_color('white')
-
-            if has_roc:
-                # Combined ROC curves
-                colors = {'fft_energy_ratio': '#E74C3C', 'exceedance_ratio': '#F39C12',
-                          'relative_residual_ratio': '#3498DB'}
-                for param_key, roc_info in roc_data.items():
-                    ax_extra.plot(roc_info['fpr'], roc_info['tpr'],
-                                 color=colors.get(param_key, 'white'), linewidth=1.2,
-                                 label=f'{param_key.replace("_", " ").title()} (AUC={roc_info["auc"]:.2f})')
-                    ax_extra.plot(roc_info['optimal_fpr'], roc_info['optimal_tpr'],
-                                 'o', color=colors.get(param_key, 'white'), markersize=6)
-                ax_extra.plot([0, 1], [0, 1], '--', color='gray', alpha=0.5)
-                ax_extra.set_xlabel('FPR', color='white', fontsize=7)
-                ax_extra.set_ylabel('TPR', color='white', fontsize=7)
-                ax_extra.set_title('ROC Curves', color='white', fontsize=8)
-                ax_extra.legend(fontsize=5, facecolor='#2E2E2E', labelcolor='white')
-                ax_extra.grid(True, linestyle='--', alpha=0.2)
-            elif has_convergence:
-                # Threshold convergence
-                history = engine.get_threshold_history()
-                if history['count']:
-                    colors_conv = {'fft_energy_ratio': '#E74C3C', 'exceedance_ratio': '#F39C12',
-                                   'relative_residual_ratio': '#3498DB'}
-                    for key, color in colors_conv.items():
-                        vals = history.get(key, [])
-                        if vals and any(v is not None for v in vals):
-                            ax_extra.plot(history['count'],
-                                          [v if v is not None else 0 for v in vals],
-                                          '-o', color=color, markersize=3, linewidth=1,
-                                          label=key.replace('_', ' ').title())
-                    ax_extra.set_xlabel('Signal Count', color='white', fontsize=7)
-                    ax_extra.set_ylabel('Threshold', color='white', fontsize=7)
-                    ax_extra.set_title('Threshold Convergence', color='white', fontsize=8)
-                    ax_extra.legend(fontsize=5, facecolor='#2E2E2E', labelcolor='white')
-                    ax_extra.grid(True, linestyle='--', alpha=0.2)
-
-        # Ensure axis labels and titles do not clip at smaller layout sizes.
-        try:
-            self.figure.tight_layout(pad=1.0)
-        except Exception:
-            # tight_layout can occasionally fail on degenerate subplot grids —
-            # not worth bubbling up.
-            pass
-
     def _update_plot(self):
-        # Show / hide the calibration-diagnostics ⓘ info row depending on the
-        # current signal source selection.
-        try:
-            if self.signal_filter == "Cal. Diagnostics":
-                if not self.cal_info_frame.winfo_ismapped():
-                    self.cal_info_frame.pack(
-                        fill=tk.X, padx=5, pady=2,
-                        before=self.canvas.get_tk_widget(),
-                    )
-            else:
-                if self.cal_info_frame.winfo_ismapped():
-                    self.cal_info_frame.pack_forget()
-        except tk.TclError:
-            # The frame may not yet be constructed during initial setup.
-            pass
-
-        # Handle calibration diagnostics view
-        if self.signal_filter == "Cal. Diagnostics":
-            self._plot_calibration_diagnostics()
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
-            return
-
         if not self.hit_history or self.current_hit_index < 0:
             return
 
@@ -560,8 +380,8 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.ax.plot(freq_axis, hit_data.filtered_physical, 'g--', linewidth=1.2, label='Lowpass Filtered')
         
         self.ax.set_xlabel('Frequency (Hz)', color='white')
-        self.ax.set_ylabel('Amplitude (pixels)', color='white')
-
+        self.ax.set_ylabel(f'Amplitude ({hit_data.y_axis_unit})', color='white')
+        
         if self.app_config:
             prefix = "psd_" if hit_data.signal_type == "psd" else ""
             lp_cutoff = getattr(self.app_config, f"{prefix}lowpass_cutoff")
@@ -581,37 +401,36 @@ class GraphViewerFrame(ttk.LabelFrame):
         num_points = len(hit_data.residual_physical)
         freq_axis = np.linspace(hit_data.x_axis_min, hit_data.x_axis_max, num_points)
         
-        # Use the dynamic threshold computed at analysis time
-        threshold = hit_data.dynamic_threshold
-
-        self.ax.plot(freq_axis, hit_data.residual_physical, 'c-', linewidth=1, label='Residual (px)')
+        if self.app_config:
+            prefix = "psd_" if hit_data.signal_type == "psd" else ""
+            threshold = getattr(self.app_config, f"{prefix}residual_threshold")
+        else:
+            threshold = 0.005
+        
+        self.ax.plot(freq_axis, hit_data.residual_physical, 'c-', linewidth=1, label='Residual')
         self.ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
-        if threshold > 0:
-            self.ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.2, label=f'±{threshold:.1f} px')
-            self.ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.2)
-
+        self.ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.2, label=f'±{threshold}')
+        self.ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.2)
+        
         exceedances = np.abs(hit_data.residual_physical) > threshold
         if np.any(exceedances):
-            self.ax.scatter(freq_axis[exceedances], hit_data.residual_physical[exceedances],
+            self.ax.scatter(freq_axis[exceedances], hit_data.residual_physical[exceedances], 
                           c='red', s=12, zorder=5, alpha=0.7)
-
+        
         self.ax.set_xlabel('Frequency (Hz)', color='white')
-        self.ax.set_ylabel('Residual (pixels)', color='white')
+        self.ax.set_ylabel(f'Residual ({hit_data.y_axis_unit})', color='white')
         classification = "BAD" if hit_data.lowpass_is_bad_hit else "GOOD"
-        ratio_pct = (hit_data.dynamic_threshold / hit_data.max_abs_residual * 100) if hit_data.max_abs_residual > 1e-9 else 0
-        self.ax.set_title(
-            f'Residual (px) - {hit_data.hit_key} - Thr: {ratio_pct:.0f}% of max '
-            f'- Exc: {hit_data.exceedance_count} ({hit_data.exceedance_ratio:.1%}) - {classification}',
-            color='white', fontsize=10)
+        self.ax.set_title(f'Residual - {hit_data.hit_key} - Exc: {hit_data.exceedance_count} ({hit_data.exceedance_ratio:.1%}) - {classification}', 
+                         color='white', fontsize=10)
         self.ax.legend(facecolor='#2E2E2E', labelcolor='white', loc='upper right')
         self.ax.grid(True, linestyle='--', alpha=0.3)
         
     def _plot_run_summary(self, hit_data: LightweightHitData):
         if not self.run_history:
-            self.ax.text(0.5, 0.5, 'No run history available',
+            self.ax.text(0.5, 0.5, 'No run history available', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
-
+            
         current_run = hit_data.run
         if current_run in self.run_history:
             run_data = self.run_history[current_run]
@@ -619,26 +438,26 @@ class GraphViewerFrame(ttk.LabelFrame):
             run_data = {}
             for rd in self.run_history.values():
                 run_data.update(rd)
-
+        
         if not run_data:
-            self.ax.text(0.5, 0.5, 'No hits recorded yet',
+            self.ax.text(0.5, 0.5, 'No hits recorded yet', 
                         transform=self.ax.transAxes, ha='center', va='center', color='white')
             return
-
+            
         hits = list(run_data.keys())
         values = [run_data[h]['exceedance_count'] for h in hits]
-
+        
         bars = self.ax.bar(range(len(hits)), values, edgecolor='white', linewidth=0.5)
-
+        
         cmap = plt.cm.jet
         vmin, vmax = min(values), max(values)
         if vmin == vmax:
             vmin, vmax = vmin - 1, vmax + 1
-
+        
         for bar, val in zip(bars, values):
             normalized = (val - vmin) / (vmax - vmin) if vmax > vmin else 0.5
             bar.set_color(cmap(normalized))
-
+        
         self.ax.set_xticks(range(len(hits)))
         self.ax.set_xticklabels(hits, rotation=45, ha='right', fontsize=7, color='white')
         self.ax.set_xlabel('Hit', color='white')

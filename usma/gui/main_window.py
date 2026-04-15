@@ -21,6 +21,7 @@ from usma.gui.hsv_calibration import HSVCalibrationWindow
 from usma.gui.overlay import RegionOverlay
 from usma.gui.config_tool import ConfigToolWindow
 from usma.gui.graph_viewer import GraphViewerFrame
+from usma.theory.wiki_viewer import show_theory_page, make_info_button
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class MonitorControlGUI:
         self.root = root
         self.calibration_mode = calibration_mode
         self.root.title(f"USMA v{APP_VERSION}")
-        self.root.geometry("1000x750")
+        self.root.geometry("1280x800")
 
         # Use provided config path or default
         default_config = "configs/default_config.json" if config_path is None else config_path
@@ -105,214 +106,225 @@ class MonitorControlGUI:
                 self._update_calibration_status(level, total)
     
     def _setup_main_gui(self):
-        # Create main container with scrollbars
-        main_container = ttk.Frame(self.root)
-        main_container.pack(fill=tk.BOTH, expand=True)
-        
-        # Canvas for scrolling
-        self.main_canvas = tk.Canvas(main_container, highlightthickness=0)
-        v_scrollbar = ttk.Scrollbar(main_container, orient=tk.VERTICAL, command=self.main_canvas.yview)
-        h_scrollbar = ttk.Scrollbar(main_container, orient=tk.HORIZONTAL, command=self.main_canvas.xview)
-        
-        # Scrollable frame inside canvas
-        self.scrollable_frame = ttk.Frame(self.main_canvas, padding=10)
-        
-        # Configure canvas scrolling
+        # Status bar at bottom (pack first so it stays at bottom)
+        self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Main horizontal PanedWindow: left controls | right visualization
+        main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True)
+
+        # ======================= LEFT COLUMN (Controls) =======================
+        left_outer = ttk.Frame(main_pane)
+        main_pane.add(left_outer, weight=2)
+
+        # Scrollable left panel
+        self.main_canvas = tk.Canvas(left_outer, highlightthickness=0, width=380)
+        left_scrollbar = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=self.main_canvas.yview)
+        left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.main_canvas.configure(yscrollcommand=left_scrollbar.set)
+
+        self.scrollable_frame = ttk.Frame(self.main_canvas, padding=5)
         self.scrollable_frame.bind(
             "<Configure>",
             lambda e: self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
         )
-        
         self.canvas_window = self.main_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.main_canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        # Bind mouse wheel scrolling
         self.main_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        
-        # Layout scrollbars and canvas
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Make canvas resize with window
-        main_container.bind("<Configure>", self._on_main_resize)
-        
-        # Now build content inside scrollable_frame
+        left_outer.bind("<Configure>", self._on_main_resize)
+
         frame = self.scrollable_frame
-        
+
+        # --- Configuration ---
         config_frame = ttk.LabelFrame(frame, text="Configuration")
-        config_frame.pack(fill=tk.X, pady=5)
-        ttk.Entry(config_frame, textvariable=self.config_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        config_frame.pack(fill=tk.X, pady=3)
+        ttk.Entry(config_frame, textvariable=self.config_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=3)
         self.load_button = ttk.Button(config_frame, text="Load...", command=self._load_config)
-        self.load_button.pack(side=tk.LEFT, padx=5)
-        self.edit_button = ttk.Button(config_frame, text="Edit Config...", command=self._launch_config_tool)
-        self.edit_button.pack(side=tk.LEFT, padx=5)
-        
-        feedback_frame = ttk.LabelFrame(frame, text="Live Analysis Feedback")
-        feedback_frame.pack(fill=tk.X, pady=5)
-        
-        self.status_light = tk.Canvas(feedback_frame, width=40, height=40, bg="gray", highlightthickness=0)
-        self.status_light.grid(row=0, column=0, rowspan=2, padx=10, pady=5)
-        
-        self.class_var = tk.StringVar(value="Overall: --")
-        self.hf_ratio_var = tk.StringVar(value="FFT Ratio (FRF): --")
-        self.exceedance_var = tk.StringVar(value="LP Exc (FRF): --")
-        self.psd_ratio_var = tk.StringVar(value="FFT Ratio (PSD): --")
-        self.psd_exceedance_var = tk.StringVar(value="LP Exc (PSD): --")
-        self.coherence_var = tk.StringVar(value="Coherence: --")
-        self.status_var = tk.StringVar(value="Status: --")
-        self.overload_var = tk.StringVar(value="Overload: --")
-        self.points_var = tk.StringVar(value="Points: --")
+        self.load_button.pack(side=tk.LEFT, padx=2)
+        self.edit_button = ttk.Button(config_frame, text="Edit...", command=self._launch_config_tool)
+        self.edit_button.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(feedback_frame, textvariable=self.class_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.hf_ratio_var, font=("Segoe UI", 10)).grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.exceedance_var, font=("Segoe UI", 10)).grid(row=0, column=3, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.psd_ratio_var, font=("Segoe UI", 10)).grid(row=1, column=1, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.psd_exceedance_var, font=("Segoe UI", 10)).grid(row=1, column=2, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.coherence_var, font=("Segoe UI", 10)).grid(row=1, column=3, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.status_var, font=("Segoe UI", 10)).grid(row=2, column=1, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.overload_var, font=("Segoe UI", 10)).grid(row=2, column=2, sticky=tk.W, padx=5)
-        ttk.Label(feedback_frame, textvariable=self.points_var, font=("Segoe UI", 10)).grid(row=2, column=3, columnspan=2, sticky=tk.W, padx=5)
-        
-        feedback_frame.columnconfigure(3, weight=1)
-        
-        # Graph viewer with reduced minimum height
-        self.graph_viewer = GraphViewerFrame(frame)
-        self.graph_viewer.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.graph_viewer.configure(height=200)  # Set minimum height
+        # --- Controls ---
+        control_frame = ttk.LabelFrame(frame, text="Controls")
+        control_frame.pack(fill=tk.X, pady=3)
 
-        bottom_panel = ttk.Frame(frame)
-        bottom_panel.pack(fill=tk.X, pady=5)
-        
-        control_frame = ttk.LabelFrame(bottom_panel, text="Controls")
-        control_frame.pack(fill=tk.Y, side=tk.LEFT, pady=5)
-        
-        self.start_stop_button = ttk.Button(control_frame, text="Start Monitoring", command=self._toggle_monitoring)
-        self.start_stop_button.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
-        
-        self.overlay_check = ttk.Checkbutton(control_frame, text="Show Overlay", variable=self.is_overlay_on, command=self._toggle_overlay)
-        self.overlay_check.pack(padx=10, pady=(0,5))
-        
-        # Log on Events Only checkbox (new)
-        self.events_only_check = ttk.Checkbutton(control_frame, text="Log on Events Only", 
+        ctrl_row1 = ttk.Frame(control_frame)
+        ctrl_row1.pack(fill=tk.X, padx=5, pady=3)
+        self.start_stop_button = ttk.Button(ctrl_row1, text="Start Monitoring", command=self._toggle_monitoring)
+        self.start_stop_button.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        self.overlay_check = ttk.Checkbutton(ctrl_row1, text="Overlay", variable=self.is_overlay_on, command=self._toggle_overlay)
+        self.overlay_check.pack(side=tk.LEFT, padx=5)
+
+        ctrl_row2 = ttk.Frame(control_frame)
+        ctrl_row2.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(ctrl_row2, text="Sample Freq (Hz):").pack(side=tk.LEFT, padx=(2,2))
+        self.freq_spinbox = ttk.Spinbox(ctrl_row2, from_=0.1, to=30.0, increment=0.1, textvariable=self.sample_frequency, width=6)
+        self.freq_spinbox.pack(side=tk.LEFT, padx=(0,5))
+        self.events_only_check = ttk.Checkbutton(ctrl_row2, text="Events Only",
                                                   variable=self.log_events_only,
                                                   command=self._toggle_events_only)
-        self.events_only_check.pack(padx=10, pady=(0,5))
-        
-        params_frame = ttk.LabelFrame(control_frame, text="Parameters")
-        params_frame.pack(padx=5, pady=5, fill=tk.Y)
-        
-        freq_frame = ttk.Frame(params_frame)
-        ttk.Label(freq_frame, text="Sample Freq (Hz):").pack(side=tk.LEFT, padx=(5,2))
-        self.freq_spinbox = ttk.Spinbox(freq_frame, from_=0.1, to=30.0, increment=0.1, textvariable=self.sample_frequency, width=6)
-        self.freq_spinbox.pack(side=tk.LEFT, padx=(0,5))
-        freq_frame.pack(pady=5)
-        
-        self.audio_check = ttk.Checkbutton(params_frame, text="Audio Feedback", variable=self.audio_feedback_on, command=self._toggle_audio_feedback)
-        self.audio_check.pack(anchor=tk.W, padx=5, pady=(0, 5))
+        self.events_only_check.pack(side=tk.LEFT, padx=5)
+        self.audio_check = ttk.Checkbutton(ctrl_row2, text="Audio", variable=self.audio_feedback_on, command=self._toggle_audio_feedback)
+        self.audio_check.pack(side=tk.LEFT, padx=2)
         if not SOUND_DEVICE_AVAILABLE:
             self.audio_check.config(state=tk.DISABLED)
             self.audio_feedback_on.set(False)
-        
-        right_panel = ttk.Frame(bottom_panel)
-        right_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10)
-        
-        self.manual_points_frame = ttk.LabelFrame(right_panel, text="Manual Points of Interest (POI) Entry")
-        self.manual_points_frame.pack(fill=tk.X)
+
+        # --- Manual POI ---
+        self.manual_points_frame = ttk.LabelFrame(frame, text="Manual POI Entry")
+        self.manual_points_frame.pack(fill=tk.X, pady=3)
         pf = self.manual_points_frame
-        
-        # Store widget references for selective enabling/disabling
+
         self.manual_run_label = ttk.Label(pf, text="Run:")
-        self.manual_run_label.grid(row=0, column=0, padx=5, pady=2)
+        self.manual_run_label.grid(row=0, column=0, padx=3, pady=1)
         self.manual_run_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['run'], width=8)
         self.manual_run_entry.grid(row=0, column=1)
-        
+
         self.manual_hammer_label = ttk.Label(pf, text="Hammer:")
-        self.manual_hammer_label.grid(row=0, column=2, padx=5)
+        self.manual_hammer_label.grid(row=0, column=2, padx=3)
         self.manual_hammer_point_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_point'], width=6)
         self.manual_hammer_point_entry.grid(row=0, column=3)
         self.manual_hammer_dir_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['hammer_dir'], width=4)
         self.manual_hammer_dir_entry.grid(row=0, column=4)
-        
+
         self.manual_response_label = ttk.Label(pf, text="Response:")
-        self.manual_response_label.grid(row=1, column=2, padx=5)
+        self.manual_response_label.grid(row=1, column=2, padx=3)
         self.manual_response_point_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['response_point'], width=6)
         self.manual_response_point_entry.grid(row=1, column=3)
         self.manual_response_dir_entry = ttk.Entry(pf, textvariable=self.manual_points_vars['response_dir'], width=4)
         self.manual_response_dir_entry.grid(row=1, column=4)
-        
-        logging_controls_frame = ttk.LabelFrame(right_panel, text="Logging")
-        logging_controls_frame.pack(fill=tk.X, pady=5)
-        
+
+        # --- Logging ---
+        logging_controls_frame = ttk.LabelFrame(frame, text="Logging")
+        logging_controls_frame.pack(fill=tk.X, pady=3)
+
         logging_main_frame = ttk.Frame(logging_controls_frame)
-        logging_main_frame.pack(fill=tk.X, side=tk.LEFT, anchor=tk.N, padx=5)
-        
-        self.verbose_check = ttk.Checkbutton(logging_main_frame, text="Verbose Console Log", variable=self.verbose_logging_on, command=self._toggle_verbose_log_options_state)
-        self.verbose_check.pack(anchor=tk.W, pady=2)
-        
-        # Verbose log options frame - horizontal 2x4 grid layout
+        logging_main_frame.pack(fill=tk.X, padx=5)
+
+        log_row1 = ttk.Frame(logging_main_frame)
+        log_row1.pack(fill=tk.X, pady=1)
+        self.verbose_check = ttk.Checkbutton(log_row1, text="Verbose Log", variable=self.verbose_logging_on, command=self._toggle_verbose_log_options_state)
+        self.verbose_check.pack(side=tk.LEFT)
+        self.img_log_check = ttk.Checkbutton(log_row1, text="Image Logs", variable=self.image_logging_on, command=self._toggle_img_log_options_state)
+        self.img_log_check.pack(side=tk.LEFT, padx=10)
+        ttk.Checkbutton(log_row1, text=".unv", variable=self.log_to_unv).pack(side=tk.LEFT, padx=5)
+
+        # Verbose log options
         self.verbose_log_options_frame = ttk.Frame(logging_main_frame)
-        self.verbose_log_options_frame.pack(fill=tk.X, pady=(2,5))
-        
-        # Row 1: Config, Mask, OCR, Classification
+        self.verbose_log_options_frame.pack(fill=tk.X, pady=1)
         vrow1 = ttk.Frame(self.verbose_log_options_frame)
         vrow1.pack(fill=tk.X, anchor=tk.W)
         ttk.Checkbutton(vrow1, text="Config", variable=self.vlog_opt_config).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(vrow1, text="Mask", variable=self.vlog_opt_mask).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(vrow1, text="OCR", variable=self.vlog_opt_ocr).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(vrow1, text="Classify", variable=self.vlog_opt_classification).pack(side=tk.LEFT, padx=2)
-        
-        # Row 2: FFT, Lowpass, File Saves
         vrow2 = ttk.Frame(self.verbose_log_options_frame)
         vrow2.pack(fill=tk.X, anchor=tk.W)
         ttk.Checkbutton(vrow2, text="FFT", variable=self.vlog_opt_fft).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(vrow2, text="Lowpass", variable=self.vlog_opt_lowpass).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(vrow2, text="FileSave", variable=self.vlog_opt_filesave).pack(side=tk.LEFT, padx=2)
-        
-        self.img_log_check = ttk.Checkbutton(logging_main_frame, text="Enable Image Logs", variable=self.image_logging_on, command=self._toggle_img_log_options_state)
-        self.img_log_check.pack(anchor=tk.W, pady=2)
-        
-        # Image log options frame - horizontal 2x4 grid layout
+
+        # Image log options
         self.img_log_options_frame = ttk.Frame(logging_main_frame)
-        self.img_log_options_frame.pack(fill=tk.X, pady=(5,0))
-        
-        # Row 1: ROI, Masks, OCR, Signal
+        self.img_log_options_frame.pack(fill=tk.X, pady=1)
         irow1 = ttk.Frame(self.img_log_options_frame)
         irow1.pack(fill=tk.X, anchor=tk.W)
         ttk.Checkbutton(irow1, text="ROI", variable=self.log_opt_screenshot).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow1, text="Masks", variable=self.log_opt_color_filter).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow1, text="OCR", variable=self.log_opt_ocr_images).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow1, text="Signal", variable=self.log_opt_signal_plot).pack(side=tk.LEFT, padx=2)
-        
-        # Row 2: FFT, Lowpass, Residual, Summary
         irow2 = ttk.Frame(self.img_log_options_frame)
         irow2.pack(fill=tk.X, anchor=tk.W)
         ttk.Checkbutton(irow2, text="FFT", variable=self.log_opt_fft_plot).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow2, text="Lowpass", variable=self.log_opt_lowpass_plot).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow2, text="Residual", variable=self.log_opt_residual_plot).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(irow2, text="Summary", variable=self.log_opt_summary_chart).pack(side=tk.LEFT, padx=2)
-        
-        data_logging_frame = ttk.Frame(logging_controls_frame)
-        data_logging_frame.pack(fill=tk.X, side=tk.LEFT, padx=10, anchor=tk.N)
-        ttk.Checkbutton(data_logging_frame, text="Log to .unv", variable=self.log_to_unv).pack(anchor=tk.W, pady=2)
 
-        # Store right_panel reference for dynamic panel swapping
-        self.right_panel = right_panel
-
-        self._setup_classification_lights(right_panel)
-
-        # --- Calibration status indicator (compact, shown in both modes) ---
-        self._setup_calibration_status_bar(right_panel)
+        # Classification lights & calibration — use frame as parent for dynamic panels
+        self.right_panel = frame  # reuse for _setup_* methods that expect right_panel
+        self._setup_classification_lights(frame)
+        self._setup_calibration_status_bar(frame)
 
         if self.calibration_mode:
-            # --- Calibration Mode Panel ---
-            self._setup_calibration_panel(right_panel)
+            self._setup_calibration_panel(frame)
         else:
-            # --- Analysis Parameters Frame (Live Tuning) ---
-            self._setup_analysis_params(right_panel)
+            self._setup_analysis_params(frame)
 
-        self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
-        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+        # ======================= RIGHT COLUMN (Visualization) =======================
+        right_outer = ttk.Frame(main_pane)
+        main_pane.add(right_outer, weight=3)
+
+        # --- Prominent classification result banner ---
+        self.class_var = tk.StringVar(value="Overall: --")
+
+        feedback_banner = tk.Frame(right_outer, bg="gray", height=50)
+        feedback_banner.pack(fill=tk.X)
+        feedback_banner.pack_propagate(False)
+
+        self.status_light = tk.Canvas(feedback_banner, width=40, height=40, bg="gray", highlightthickness=0)
+        self.status_light.pack(side=tk.LEFT, padx=8, pady=5)
+
+        tk.Label(feedback_banner, textvariable=self.class_var,
+                 font=("Segoe UI", 16, "bold"), bg="gray", fg="white").pack(side=tk.LEFT, padx=5)
+
+        # ⓘ next to the classification text — opens hit_classification page.
+        # Match the banner's gray background so the label doesn't look
+        # transparent against the darker TkDefault frame colour.
+        _info_cls = make_info_button(feedback_banner, self.root,
+                                     "hit_classification",
+                                     side=tk.LEFT, padx=(10, 0))
+        _info_cls.configure(bg="gray")
+
+        # Compact feedback details
+        self.hf_ratio_var = tk.StringVar(value="FFT(FRF): --")
+        self.exceedance_var = tk.StringVar(value="LP(FRF): --")
+        self.psd_ratio_var = tk.StringVar(value="FFT(PSD): --")
+        self.psd_exceedance_var = tk.StringVar(value="LP(PSD): --")
+        self.coherence_var = tk.StringVar(value="Coh: --")
+        self.status_var = tk.StringVar(value="Status: --")
+        self.overload_var = tk.StringVar(value="Overload: --")
+        self.points_var = tk.StringVar(value="Points: --")
+
+        detail_frame = tk.Frame(feedback_banner, bg="gray")
+        detail_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        detail_row1 = tk.Frame(detail_frame, bg="gray")
+        detail_row1.pack(fill=tk.X)
+        tk.Label(detail_row1, textvariable=self.hf_ratio_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        tk.Label(detail_row1, textvariable=self.exceedance_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        tk.Label(detail_row1, textvariable=self.psd_ratio_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        tk.Label(detail_row1, textvariable=self.psd_exceedance_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        detail_row2 = tk.Frame(detail_frame, bg="gray")
+        detail_row2.pack(fill=tk.X)
+        tk.Label(detail_row2, textvariable=self.coherence_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        # Inline ⓘ for coherence readout (needs bg="gray" to match banner)
+        _coh_info = tk.Label(detail_row2, text="\u24D8", font=("Segoe UI", 9),
+                             fg="#5DADE2", bg="gray", cursor="hand2", padx=2)
+        _coh_info.bind("<Button-1>",
+                       lambda e: show_theory_page(self.root, "coherence_analysis"))
+        _coh_info.pack(side=tk.LEFT, padx=1)
+        tk.Label(detail_row2, textvariable=self.status_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        tk.Label(detail_row2, textvariable=self.overload_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+        tk.Label(detail_row2, textvariable=self.points_var, font=("Segoe UI", 8), bg="gray", fg="white").pack(side=tk.LEFT, padx=3)
+
+        # --- Graph Viewer (dominant) ---
+        self.graph_viewer = GraphViewerFrame(right_outer)
+        self.graph_viewer.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self.graph_viewer.calibration_engine = self.calibration_engine
+
+        # --- Collapsible Console ---
+        self._console_visible = tk.BooleanVar(value=False)
+        console_toggle_frame = ttk.Frame(right_outer)
+        console_toggle_frame.pack(fill=tk.X)
+        self._console_toggle_btn = ttk.Checkbutton(
+            console_toggle_frame, text="Show Console", variable=self._console_visible,
+            command=self._toggle_console)
+        self._console_toggle_btn.pack(side=tk.LEFT, padx=5, pady=2)
+
+        self._console_frame = ttk.LabelFrame(right_outer, text="Console Output")
+        # Console starts hidden — don't pack yet
+        self.graph_viewer.setup_console(self._console_frame)
+
         self._toggle_img_log_options_state()
         self._toggle_verbose_log_options_state()
         self._update_manual_points_state()
@@ -325,11 +337,18 @@ class MonitorControlGUI:
             pass
     
     def _on_main_resize(self, event):
-        """Resize canvas window when main window resizes."""
-        # Update the width of the canvas window to match canvas width
+        """Resize canvas window when left panel resizes."""
         canvas_width = event.width
         self.main_canvas.itemconfig(self.canvas_window, width=canvas_width)
-    
+
+    def _toggle_console(self):
+        """Show or hide the console panel."""
+        if self._console_visible.get():
+            self._console_frame.pack(fill=tk.BOTH, padx=2, pady=(0, 2))
+            self._console_frame.configure(height=150)
+        else:
+            self._console_frame.pack_forget()
+
     def _toggle_events_only(self):
         """Toggle between event-based and continuous logging."""
         self.monitor.log_events_only = self.log_events_only.get()
@@ -364,14 +383,14 @@ class MonitorControlGUI:
             cfg.fft_energy_ratio_threshold = self.param_vars['fft_energy_ratio_threshold'].get()
             cfg.lowpass_cutoff = self.param_vars['lowpass_cutoff'].get()
             cfg.lowpass_filter_order = int(self.param_vars['lowpass_filter_order'].get())
-            cfg.residual_threshold = self.param_vars['residual_threshold'].get()
+            cfg.relative_residual_ratio = self.param_vars['relative_residual_ratio'].get()
             cfg.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
 
             cfg.psd_fft_cutoff_frequency = self.param_vars['psd_fft_cutoff_frequency'].get()
             cfg.psd_fft_energy_ratio_threshold = self.param_vars['psd_fft_energy_ratio_threshold'].get()
             cfg.psd_lowpass_cutoff = self.param_vars['psd_lowpass_cutoff'].get()
             cfg.psd_lowpass_filter_order = int(self.param_vars['psd_lowpass_filter_order'].get())
-            cfg.psd_residual_threshold = self.param_vars['psd_residual_threshold'].get()
+            cfg.psd_relative_residual_ratio = self.param_vars['psd_relative_residual_ratio'].get()
             cfg.psd_exceedance_ratio_threshold = self.param_vars['psd_exceedance_ratio_threshold'].get()
 
             # Also update the graph viewer's reference
@@ -379,10 +398,10 @@ class MonitorControlGUI:
 
             logger.info(f"Parameters applied — FRF: FFT={cfg.fft_cutoff_frequency:.4f}, "
                         f"E.Ratio={cfg.fft_energy_ratio_threshold:.4f}, LP={cfg.lowpass_cutoff:.4f}, "
-                        f"Order={cfg.lowpass_filter_order}, Res={cfg.residual_threshold:.6f}, "
+                        f"Order={cfg.lowpass_filter_order}, Ratio={cfg.relative_residual_ratio:.4f}, "
                         f"Exc={cfg.exceedance_ratio_threshold:.4f} | PSD: FFT={cfg.psd_fft_cutoff_frequency:.4f}, "
                         f"E.Ratio={cfg.psd_fft_energy_ratio_threshold:.4f}, LP={cfg.psd_lowpass_cutoff:.4f}, "
-                        f"Order={cfg.psd_lowpass_filter_order}, Res={cfg.psd_residual_threshold:.6f}, "
+                        f"Order={cfg.psd_lowpass_filter_order}, Ratio={cfg.psd_relative_residual_ratio:.4f}, "
                         f"Exc={cfg.psd_exceedance_ratio_threshold:.4f}")
         except tk.TclError:
             pass  # User mid-edit, ignore
@@ -416,6 +435,13 @@ class MonitorControlGUI:
             container.bind("<Button-1>", toggle_func)
             canvas.bind("<Button-1>", toggle_func)
             lbl.bind("<Button-1>", toggle_func)
+
+        # One ⓘ for the whole lights row — opens the hit_classification page
+        # which explains all four methods and the voting logic together.
+        info_frame = ttk.Frame(lights_frame)
+        info_frame.pack(side=tk.RIGHT, padx=5)
+        make_info_button(info_frame, self.root, "hit_classification",
+                         side=tk.LEFT)
 
     def _toggle_method(self, method_key: str):
         self.enabled_methods[method_key] = not self.enabled_methods[method_key]
@@ -466,17 +492,17 @@ class MonitorControlGUI:
         if hasattr(self, '_update_method_lights'):
             self._update_method_lights(result)
 
-        # --- FRF readout ---
+        # --- FRF readout (compact labels for banner) ---
         if result.avg_energy_ratio is not None:
-            self.hf_ratio_var.set(f"FFT Ratio (FRF): {result.avg_energy_ratio:.3e}")
+            self.hf_ratio_var.set(f"FFT(FRF): {result.avg_energy_ratio:.3e}")
         if result.avg_exceedance_count is not None:
-            self.exceedance_var.set(f"LP Exc (FRF): {result.avg_exceedance_count:.0f} ({result.avg_exceedance_ratio:.1%})")
+            self.exceedance_var.set(f"LP(FRF): {result.avg_exceedance_count:.0f} ({result.avg_exceedance_ratio:.1%})")
 
         # --- PSD readout (if PSD regions exist) ---
         if result.psd_avg_energy_ratio is not None:
-            self.psd_ratio_var.set(f"FFT Ratio (PSD): {result.psd_avg_energy_ratio:.3e}")
+            self.psd_ratio_var.set(f"FFT(PSD): {result.psd_avg_energy_ratio:.3e}")
         if result.psd_avg_exceedance_count is not None and result.psd_avg_exceedance_ratio is not None:
-            self.psd_exceedance_var.set(f"LP Exc (PSD): {result.psd_avg_exceedance_count:.0f} ({result.psd_avg_exceedance_ratio:.1%})")
+            self.psd_exceedance_var.set(f"LP(PSD): {result.psd_avg_exceedance_count:.0f} ({result.psd_avg_exceedance_ratio:.1%})")
 
         # --- Coherence readout (if coherence ROIs exist) ---
         if result.coherence_results:
@@ -519,11 +545,11 @@ class MonitorControlGUI:
             self._update_method_lights(None)
         self.class_var.set("Overall: --")
         self.status_light.config(bg="gray")
-        self.hf_ratio_var.set("FFT Ratio (FRF): --")
-        self.exceedance_var.set("LP Exc (FRF): --")
-        self.psd_ratio_var.set("FFT Ratio (PSD): --")
-        self.psd_exceedance_var.set("LP Exc (PSD): --")
-        self.coherence_var.set("Coherence: --")
+        self.hf_ratio_var.set("FFT(FRF): --")
+        self.exceedance_var.set("LP(FRF): --")
+        self.psd_ratio_var.set("FFT(PSD): --")
+        self.psd_exceedance_var.set("LP(PSD): --")
+        self.coherence_var.set("Coh: --")
         self.status_var.set("Status: --")
         self.overload_var.set("Overload: --")
         self.points_var.set("Points: --")
@@ -605,11 +631,21 @@ class MonitorControlGUI:
 
     def _setup_calibration_status_bar(self, parent):
         """Create the compact calibration status indicator."""
-        self.cal_status_label_bar = tk.Label(parent, text="\u26A0 Not Calibrated",
+        # Wrap the status label and an ⓘ button in a single row so the info
+        # button can sit to the right of the coloured status bar.
+        cal_bar_frame = tk.Frame(parent)
+        cal_bar_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.cal_status_label_bar = tk.Label(cal_bar_frame,
+                                             text="\u26A0 Not Calibrated",
                                              font=("Segoe UI", 9, "bold"),
                                              fg="white", bg="#E74C3C",
                                              anchor=tk.CENTER, padx=8, pady=2)
-        self.cal_status_label_bar.pack(fill=tk.X, pady=(10, 0))
+        self.cal_status_label_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        make_info_button(cal_bar_frame, self.root, "calibration_engine",
+                         side=tk.RIGHT, padx=5)
+
         self._update_calibration_status(level=0, total_signals=0)
 
     def _update_calibration_status(self, level: int, total_signals: int):
@@ -638,6 +674,14 @@ class MonitorControlGUI:
 
         self.cal_frame = ttk.LabelFrame(parent, text="Calibration")
         self.cal_frame.pack(fill=tk.X, pady=(5, 0))
+
+        # "How calibration works" info row inside the label frame
+        cal_info_row = ttk.Frame(self.cal_frame)
+        cal_info_row.pack(fill=tk.X, padx=5, pady=(2, 0))
+        ttk.Label(cal_info_row, text="How calibration works:",
+                  font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        make_info_button(cal_info_row, self.root, "calibration_engine",
+                         side=tk.LEFT)
 
         # Row 1: Buttons + counter (all inline)
         row1 = ttk.Frame(self.cal_frame)
@@ -690,13 +734,13 @@ class MonitorControlGUI:
             'fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.fft_energy_ratio_threshold),
             'lowpass_cutoff': tk.DoubleVar(value=cfg.lowpass_cutoff),
             'lowpass_filter_order': tk.IntVar(value=cfg.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=cfg.residual_threshold),
+            'relative_residual_ratio': tk.DoubleVar(value=cfg.relative_residual_ratio),
             'exceedance_ratio_threshold': tk.DoubleVar(value=cfg.exceedance_ratio_threshold),
             'psd_fft_cutoff_frequency': tk.DoubleVar(value=cfg.psd_fft_cutoff_frequency),
             'psd_fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.psd_fft_energy_ratio_threshold),
             'psd_lowpass_cutoff': tk.DoubleVar(value=cfg.psd_lowpass_cutoff),
             'psd_lowpass_filter_order': tk.IntVar(value=cfg.psd_lowpass_filter_order),
-            'psd_residual_threshold': tk.DoubleVar(value=cfg.psd_residual_threshold),
+            'psd_relative_residual_ratio': tk.DoubleVar(value=cfg.psd_relative_residual_ratio),
             'psd_exceedance_ratio_threshold': tk.DoubleVar(value=cfg.psd_exceedance_ratio_threshold)
         }
 
@@ -753,6 +797,13 @@ class MonitorControlGUI:
                 'exceedance_count': sig.exceedance_count,
                 'total_energy': sig.total_energy,
                 'high_freq_energy': sig.high_freq_energy,
+                'max_abs_residual': sig.max_abs_residual,
+                'relative_residual_ratio': (
+                    self.monitor.app_config.psd_relative_residual_ratio
+                    if sig.signal_type == 'psd'
+                    else self.monitor.app_config.relative_residual_ratio
+                ),
+                'signal_vector': sig.residual_physical,  # pixel-space; used by LP cutoff sweep
                 'roi_name': sig.hit_key,
                 'signal_type': sig.signal_type,
                 'source': 'calibration_phase',
@@ -788,6 +839,9 @@ class MonitorControlGUI:
         level = self.calibration_engine.confidence_level
         self._update_calibration_status(level, total)
 
+        # Update calibration diagnostic plots
+        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+
         # If we can estimate, compute and display parameters
         if self.calibration_engine.can_estimate:
             estimates = self.calibration_engine.get_estimates()
@@ -821,7 +875,7 @@ class MonitorControlGUI:
         param_map = {
             'fft_energy_ratio_threshold': 'fft_energy_ratio_threshold',
             'exceedance_ratio_threshold': 'exceedance_ratio_threshold',
-            'residual_threshold': 'residual_threshold',
+            'relative_residual_ratio': 'relative_residual_ratio',
             'fft_cutoff_frequency': 'fft_cutoff_frequency',
             'lowpass_cutoff': 'lowpass_cutoff',
         }
@@ -864,7 +918,7 @@ class MonitorControlGUI:
             estimates = self.calibration_engine.get_estimates()
             if estimates:
                 for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
-                            'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                            'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
                     if key in estimates:
                         meta[key] = estimates[key]
                         psd_key = f'psd_{key}'
@@ -878,7 +932,14 @@ class MonitorControlGUI:
             logger.error(f"[CAL] Failed to save calibration data: {e}")
 
     def _check_signal_similarity(self, new_signal: 'LightweightHitData') -> Tuple[bool, Optional[int]]:
-        """Check if new signal is too similar to an already-classified signal."""
+        """Check if new signal is too similar to an already-classified signal.
+
+        Uses four criteria — all must be met to flag as duplicate:
+        1. Peak amplitude ratio > 0.90 (less than 10% difference)
+        2. Max cross-correlation across ±10 sample lags > 0.99
+        3. Cosine similarity of unit-normalised FFT spectra > 0.99
+        4. FFT magnitude ratio > 0.90
+        """
         if not hasattr(self, 'calibration_engine'):
             return False, None
 
@@ -904,22 +965,67 @@ class MonitorControlGUI:
             if len(new_phys) != len(old_phys) or len(new_fft) != len(old_fft):
                 continue
 
-            # Normalised cross-correlation
+            # 1. Amplitude-based discrimination
+            peak_new = np.max(np.abs(new_phys))
+            peak_old = np.max(np.abs(old_phys))
+            if peak_new < 1e-12 or peak_old < 1e-12:
+                continue
+            amp_ratio = min(peak_new, peak_old) / max(peak_new, peak_old)
+            if amp_ratio < 0.90:
+                continue  # Amplitudes differ by >10% — not a duplicate
+
+            # 2. Cross-correlation with lag search (±10 samples)
+            max_lag = min(10, len(new_phys) // 4)
             try:
-                ncc = float(np.corrcoef(new_phys, old_phys)[0, 1])
+                new_centered = new_phys - np.mean(new_phys)
+                old_centered = old_phys - np.mean(old_phys)
+                norm_factor = np.sqrt(np.sum(new_centered**2) * np.sum(old_centered**2))
+                if norm_factor < 1e-12:
+                    ncc = 0.0
+                else:
+                    best_ncc = 0.0
+                    for lag in range(-max_lag, max_lag + 1):
+                        if lag < 0:
+                            cc = np.sum(new_centered[:lag] * old_centered[-lag:])
+                        elif lag > 0:
+                            cc = np.sum(new_centered[lag:] * old_centered[:-lag])
+                        else:
+                            cc = np.sum(new_centered * old_centered)
+                        ncc_val = cc / norm_factor
+                        if ncc_val > best_ncc:
+                            best_ncc = ncc_val
+                    ncc = best_ncc
             except Exception:
                 ncc = 0.0
 
-            # Cosine similarity of FFT spectra
-            norm_new = np.linalg.norm(new_fft)
-            norm_old = np.linalg.norm(old_fft)
-            if norm_new > 1e-12 and norm_old > 1e-12:
-                cos_sim = float(np.dot(new_fft, old_fft) / (norm_new * norm_old))
+            if ncc < 0.99:
+                continue  # Shape differs enough — not a duplicate
+
+            # 3. Cosine similarity of unit-normalised FFT spectra (shape only)
+            norm_new_fft = np.linalg.norm(new_fft)
+            norm_old_fft = np.linalg.norm(old_fft)
+            if norm_new_fft > 1e-12 and norm_old_fft > 1e-12:
+                new_fft_unit = new_fft / norm_new_fft
+                old_fft_unit = old_fft / norm_old_fft
+                cos_sim = float(np.dot(new_fft_unit, old_fft_unit))
             else:
                 cos_sim = 0.0
 
-            if ncc > 0.95 and cos_sim > 0.95:
-                return True, i
+            if cos_sim < 0.99:
+                continue  # Spectral shape differs — not a duplicate
+
+            # 4. FFT magnitude ratio check
+            fft_mag_ratio = min(norm_new_fft, norm_old_fft) / max(norm_new_fft, norm_old_fft)
+            if fft_mag_ratio < 0.90:
+                continue  # Spectral magnitude differs — not a duplicate
+
+            # All criteria met — flag as duplicate
+            logger.info(
+                f"[CAL] Similar signal detected: signal matches stored #{i+1} "
+                f"(NCC={ncc:.4f}, CosSim={cos_sim:.4f}, "
+                f"AmpRatio={amp_ratio:.4f}, FFTMagRatio={fft_mag_ratio:.4f})"
+            )
+            return True, i
 
         return False, None
 
@@ -937,6 +1043,17 @@ class MonitorControlGUI:
 
         # Reset engine
         self.calibration_engine = HybridCalibrationEngine()
+
+        # Sync the graph viewer's reference so the diagnostic plots show the
+        # empty-state view instead of continuing to render against the old
+        # engine object.
+        if hasattr(self, 'graph_viewer') and self.graph_viewer is not None:
+            self.graph_viewer.calibration_engine = self.calibration_engine
+            if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
+                try:
+                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+                except Exception as e:
+                    logger.debug(f"[CAL] Could not refresh diagnostics after clear: {e}")
 
         # Reset counters if in calibration mode
         if hasattr(self, 'cal_good_count'):
@@ -956,13 +1073,13 @@ class MonitorControlGUI:
         cfg.fft_energy_ratio_threshold = 0.006
         cfg.lowpass_cutoff = 0.07
         cfg.lowpass_filter_order = 7
-        cfg.residual_threshold = 0.005
+        cfg.relative_residual_ratio = 0.10
         cfg.exceedance_ratio_threshold = 0.7
         cfg.psd_fft_cutoff_frequency = 0.07
         cfg.psd_fft_energy_ratio_threshold = 0.006
         cfg.psd_lowpass_cutoff = 0.07
         cfg.psd_lowpass_filter_order = 7
-        cfg.psd_residual_threshold = 0.005
+        cfg.psd_relative_residual_ratio = 0.10
         cfg.psd_exceedance_ratio_threshold = 0.7
 
         # Update GUI
@@ -1006,7 +1123,7 @@ class MonitorControlGUI:
             # Log the final parameter values
             logger.info("[CAL] Final calibrated parameters:")
             for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
-                        'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                        'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
                 if key in estimates:
                     logger.info(f"  {key} = {estimates[key]:.6f}")
 
@@ -1016,12 +1133,12 @@ class MonitorControlGUI:
                 "Estimated parameters:"
             ]
             for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
-                        'residual_threshold', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                        'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
                 if key in estimates:
                     default_val = {
                         'fft_energy_ratio_threshold': 0.006,
                         'exceedance_ratio_threshold': 0.7,
-                        'residual_threshold': 0.005,
+                        'relative_residual_ratio': 0.10,
                         'fft_cutoff_frequency': 0.07,
                         'lowpass_cutoff': 0.07,
                     }.get(key, 0)
@@ -1039,6 +1156,21 @@ class MonitorControlGUI:
 
         # Save calibration data to config file
         self._save_calibration_to_config()
+
+        # Clear stored signals from the engine now that thresholds have been
+        # computed and applied. This prevents the similarity checker (used by
+        # live calibration after finishing) from comparing new hits against the
+        # finished session's population, which caused false "too similar" popups.
+        self.calibration_engine.clear_signals()
+        # Keep the graph viewer's reference in sync so diagnostic plots reflect
+        # the cleared state.
+        if hasattr(self, 'graph_viewer') and self.graph_viewer is not None:
+            self.graph_viewer.calibration_engine = self.calibration_engine
+            if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
+                try:
+                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+                except Exception as e:
+                    logger.debug(f"[CAL] Could not refresh diagnostics after finish: {e}")
 
         # Destroy calibration panel
         if hasattr(self, 'cal_frame') and self.cal_frame.winfo_exists():
@@ -1063,13 +1195,13 @@ class MonitorControlGUI:
         self.param_vars['fft_energy_ratio_threshold'].set(cfg.fft_energy_ratio_threshold)
         self.param_vars['lowpass_cutoff'].set(cfg.lowpass_cutoff)
         self.param_vars['lowpass_filter_order'].set(cfg.lowpass_filter_order)
-        self.param_vars['residual_threshold'].set(cfg.residual_threshold)
+        self.param_vars['relative_residual_ratio'].set(cfg.relative_residual_ratio)
         self.param_vars['exceedance_ratio_threshold'].set(cfg.exceedance_ratio_threshold)
         self.param_vars['psd_fft_cutoff_frequency'].set(cfg.psd_fft_cutoff_frequency)
         self.param_vars['psd_fft_energy_ratio_threshold'].set(cfg.psd_fft_energy_ratio_threshold)
         self.param_vars['psd_lowpass_cutoff'].set(cfg.psd_lowpass_cutoff)
         self.param_vars['psd_lowpass_filter_order'].set(cfg.psd_lowpass_filter_order)
-        self.param_vars['psd_residual_threshold'].set(cfg.psd_residual_threshold)
+        self.param_vars['psd_relative_residual_ratio'].set(cfg.psd_relative_residual_ratio)
         self.param_vars['psd_exceedance_ratio_threshold'].set(cfg.psd_exceedance_ratio_threshold)
 
     def _setup_analysis_params(self, parent):
@@ -1083,13 +1215,13 @@ class MonitorControlGUI:
             'fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.fft_energy_ratio_threshold),
             'lowpass_cutoff': tk.DoubleVar(value=cfg.lowpass_cutoff),
             'lowpass_filter_order': tk.IntVar(value=cfg.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=cfg.residual_threshold),
+            'relative_residual_ratio': tk.DoubleVar(value=cfg.relative_residual_ratio),
             'exceedance_ratio_threshold': tk.DoubleVar(value=cfg.exceedance_ratio_threshold),
             'psd_fft_cutoff_frequency': tk.DoubleVar(value=cfg.psd_fft_cutoff_frequency),
             'psd_fft_energy_ratio_threshold': tk.DoubleVar(value=cfg.psd_fft_energy_ratio_threshold),
             'psd_lowpass_cutoff': tk.DoubleVar(value=cfg.psd_lowpass_cutoff),
             'psd_lowpass_filter_order': tk.IntVar(value=cfg.psd_lowpass_filter_order),
-            'psd_residual_threshold': tk.DoubleVar(value=cfg.psd_residual_threshold),
+            'psd_relative_residual_ratio': tk.DoubleVar(value=cfg.psd_relative_residual_ratio),
             'psd_exceedance_ratio_threshold': tk.DoubleVar(value=cfg.psd_exceedance_ratio_threshold)
         }
 
@@ -1137,6 +1269,19 @@ class MonitorControlGUI:
                               command=self._clear_calibration)
         clear_btn.pack(side=tk.RIGHT, padx=2)
 
+        # Info row under the buttons — link to the calibration engine theory
+        # and the practical tuning guide.
+        cal_live_info = ttk.Frame(live_cal_frame)
+        cal_live_info.pack(fill=tk.X, padx=5, pady=(0, 2))
+        ttk.Label(cal_live_info, text="About calibration:",
+                  font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        make_info_button(cal_live_info, self.root, "calibration_engine",
+                         side=tk.LEFT)
+        ttk.Label(cal_live_info, text="Tuning guide:",
+                  font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(8, 0))
+        make_info_button(cal_live_info, self.root, "practical_tuning",
+                         side=tk.LEFT)
+
         self.live_cal_pending_signal = None
 
     def _build_param_row(self, parent, prefix: str):
@@ -1151,6 +1296,7 @@ class MonitorControlGUI:
                                width=10, format="%.6f", command=self._apply_params_live)
         fft_spin.pack(side=tk.LEFT, padx=2)
         fft_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row1, self.root, "fft_cutoff_frequency", side=tk.LEFT)
 
         ttk.Label(row1, text="E.Ratio Thr:", width=10).pack(side=tk.LEFT, padx=(5, 0))
         ratio_spin = ttk.Spinbox(row1, from_=0.0001, to=0.50, increment=0.001,
@@ -1158,6 +1304,7 @@ class MonitorControlGUI:
                                  width=10, format="%.6f", command=self._apply_params_live)
         ratio_spin.pack(side=tk.LEFT, padx=2)
         ratio_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row1, self.root, "fft_energy_ratio_threshold", side=tk.LEFT)
 
         # Row 2: Lowpass Cutoff, Lowpass Filter Order
         row2 = ttk.Frame(parent)
@@ -1169,6 +1316,7 @@ class MonitorControlGUI:
                               width=10, format="%.6f", command=self._apply_params_live)
         lp_spin.pack(side=tk.LEFT, padx=2)
         lp_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row2, self.root, "lowpass_cutoff", side=tk.LEFT)
 
         ttk.Label(row2, text="Order:", width=10).pack(side=tk.LEFT, padx=(5, 0))
         order_spin = ttk.Spinbox(row2, from_=1, to=15, increment=1,
@@ -1176,17 +1324,19 @@ class MonitorControlGUI:
                                  width=10, command=self._apply_params_live)
         order_spin.pack(side=tk.LEFT, padx=2)
         order_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row2, self.root, "lowpass_filter_order", side=tk.LEFT)
 
-        # Row 3: Residual Threshold, Exceedance Ratio Threshold
+        # Row 3: Relative Residual Ratio, Exceedance Ratio Threshold
         row3 = ttk.Frame(parent)
         row3.pack(fill=tk.X, padx=5, pady=2)
-        
-        ttk.Label(row3, text="Res.Thr:", width=10).pack(side=tk.LEFT)
-        res_spin = ttk.Spinbox(row3, from_=0.00001, to=1.0, increment=0.0005,
-                               textvariable=self.param_vars[f'{prefix}residual_threshold'],
-                               width=10, format="%.6f", command=self._apply_params_live)
+
+        ttk.Label(row3, text="Res.Ratio:", width=10).pack(side=tk.LEFT)
+        res_spin = ttk.Spinbox(row3, from_=0.01, to=0.50, increment=0.01,
+                               textvariable=self.param_vars[f'{prefix}relative_residual_ratio'],
+                               width=10, format="%.2f", command=self._apply_params_live)
         res_spin.pack(side=tk.LEFT, padx=2)
         res_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row3, self.root, "residual_threshold", side=tk.LEFT)
 
         ttk.Label(row3, text="Exc.Ratio:", width=10).pack(side=tk.LEFT, padx=(5, 0))
         exc_spin = ttk.Spinbox(row3, from_=0.01, to=0.99, increment=0.01,
@@ -1194,6 +1344,7 @@ class MonitorControlGUI:
                                width=10, format="%.4f", command=self._apply_params_live)
         exc_spin.pack(side=tk.LEFT, padx=2)
         exc_spin.bind('<Return>', lambda e: self._apply_params_live())
+        make_info_button(row3, self.root, "exceedance_ratio_threshold", side=tk.LEFT)
 
     def _live_cal_on_new_signal(self, lightweight_data: LightweightHitData):
         """Called when a new signal arrives in live analysis mode — enable Good/Bad buttons."""
@@ -1273,6 +1424,9 @@ class MonitorControlGUI:
 
         # Update calibration status bar
         self._update_calibration_status(level, total)
+
+        # Update calibration diagnostic plots
+        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
 
         # Auto-save calibration data periodically
         if total > 0 and total % 3 == 0:

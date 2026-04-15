@@ -1,0 +1,59 @@
+# FFT Cutoff Frequency
+
+**Parameter:** `fft_cutoff_frequency` (FRF) / `psd_fft_cutoff_frequency` (PSD)
+**Default:** `0.07`
+**Range:** `0.02 – 0.25`
+
+## What it is
+
+A normalised spatial frequency threshold, ranging from 0 to 0.5 (Nyquist).
+
+The signal is **not sampled in time** — it's sampled in pixels horizontally
+across the ROI. So this is a **spatial frequency** in units of cycles/pixel,
+**not Hz**.
+
+## What it does
+
+Splits the FFT spectrum into "low-frequency" (≤ cutoff) and "high-frequency"
+(> cutoff) halves:
+
+```
+cutoff_indices   = np.where(xf >= fft_cutoff)[0]
+high_freq_energy = np.sum(fft_mags[cutoff_indices[0]:] ** 2)
+energy_ratio     = high_freq_energy / total_energy
+```
+
+The `energy_ratio` is then compared against `fft_energy_ratio_threshold`.
+
+## Intuition
+
+- A **clean, smooth** FRF/PSD signal changes slowly across the ROI → most
+  energy sits at low spatial frequencies.
+- A **noisy or double-hit** signal has rapid oscillations → elevated
+  high-frequency energy.
+
+The cutoff defines the boundary between "slowly varying" and "rapidly
+oscillating".
+
+## Effect of the default (0.07)
+
+0.07 means anything above 7% of Nyquist is considered "high frequency". With
+a typical 500-pixel-wide ROI, this corresponds to features that repeat every
+~14 pixels or less — a reasonable proxy for "visible ripples".
+
+## Effect of changing it
+
+- **Lower cutoff** → more of the spectrum is labelled "high frequency" →
+  higher energy ratios → **easier to flag as BAD**.
+- **Higher cutoff** → stricter definition of "high frequency" → lower energy
+  ratios → **harder to flag**.
+
+## Calibration
+
+Only the `PercentileBoundaryEstimator` sweeps this parameter. It tests
+candidates over `[0.02, 0.25]` in steps of 0.005 and picks the cutoff that
+maximises mean separation between the Good and Bad populations' energy ratios.
+Neither the Bayesian nor the ROC estimators attempt to re-tune it.
+
+---
+See also: fft_method, fft_energy_ratio_threshold, practical_tuning, calibration_engine

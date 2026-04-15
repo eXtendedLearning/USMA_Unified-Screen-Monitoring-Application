@@ -20,6 +20,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 
+from usma.theory.wiki_viewer import show_theory_page
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +86,17 @@ class HSVCalibrationWindow(tk.Toplevel):
         self.after(100, lambda *args, **kwargs: self._update_preview())
 
     def _setup_ui(self):
+        # Theory ⓘ row at the top — explains HSV filtering theory
+        info_row = ttk.Frame(self)
+        info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
+        ttk.Label(info_row, text="About HSV color filtering:",
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        _hsv_info = tk.Label(info_row, text="\u24D8", font=("Segoe UI", 10),
+                             fg="#5DADE2", cursor="hand2")
+        _hsv_info.bind("<Button-1>",
+                       lambda e: show_theory_page(self, "hsv_calibration"))
+        _hsv_info.pack(side=tk.LEFT, padx=2)
+
         # Top: Region selector (if multiple wave regions)
         if len(self.wave_regions) > 1:
             selector_frame = ttk.Frame(self)

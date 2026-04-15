@@ -12,7 +12,7 @@ from scipy.signal import butter, filtfilt
 logger = logging.getLogger(__name__)
 
 # --- Version Configuration ---
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.12.0"
 
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
 @dataclass
@@ -99,6 +99,8 @@ class FRFAnalysisResult:
     exceedance_count: int = 0
     exceedance_ratio: float = 0.0
     lowpass_is_bad_hit: bool = False
+    max_abs_residual: float = 0.0
+    dynamic_threshold: float = 0.0
     y_axis_unit: str = "g/N"
 
 @dataclass(slots=True)
@@ -122,6 +124,8 @@ class LightweightHitData:
     hit_key: str
     run: str
     signal_type: str = "frf"  # "frf", "psd", or "coherence"
+    max_abs_residual: float = 0.0
+    dynamic_threshold: float = 0.0
 
 # ---------------------------------------------------------------------------
 # NEW v0.6.0 DATACLASSES
@@ -142,6 +146,7 @@ class CalibrationSignal:
     judgment: str  # "GOOD", "BAD", or "IGNORE"
     timestamp: str
     roi_name: str
+    max_abs_residual: float = 0.0
     source: str = "calibration_phase"  # "calibration_phase" or "live_monitoring"
 
 @dataclass
@@ -201,17 +206,48 @@ class PercentileBoundaryEstimator:
         bad_exc = [s['exceedance_ratio'] for s in self.bad_signals]
         params['exceedance_ratio_threshold'] = self._find_boundary(good_exc, bad_exc)
 
-        # --- 3. Residual Threshold ---
-        good_max_res = [float(np.max(np.abs(s['residual_physical'])))
-                        for s in self.good_signals]
-        bad_max_res = [float(np.max(np.abs(s['residual_physical'])))
-                       for s in self.bad_signals]
-        params['residual_threshold'] = self._find_boundary(good_max_res, bad_max_res)
+        # --- 3. Relative Residual Ratio ---
+        # Sweep candidate ratios to find best Good/Bad separation on exceedance_ratio.
+        params['relative_residual_ratio'] = self._sweep_relative_residual_ratio()
 
         # --- 4. Filter Parameter Sweep ---
         params.update(self._sweep_filter_params())
 
         return params
+
+    def _sweep_relative_residual_ratio(self) -> float:
+        """Sweep relative_residual_ratio to find best Good/Bad separation.
+
+        For each candidate ratio, recompute exceedance_ratio for all signals
+        and pick the ratio that maximises mean separation (bad_mean - good_mean).
+        """
+        all_signals = self.good_signals + self.bad_signals
+        labels = np.array([1] * len(self.good_signals) + [0] * len(self.bad_signals))
+
+        best_ratio = 0.10
+        best_score = -np.inf
+
+        for candidate in np.arange(0.02, 0.50, 0.01):
+            exc_ratios = []
+            for sig in all_signals:
+                residual = np.array(sig['residual_physical'])
+                max_abs = float(np.max(np.abs(residual))) if len(residual) > 0 else 0.0
+                if max_abs < 1e-9:
+                    exc_ratios.append(0.0)
+                    continue
+                dynamic_thr = candidate * max_abs
+                exc = np.sum(np.abs(residual) > dynamic_thr) / len(residual)
+                exc_ratios.append(exc)
+
+            exc_ratios = np.array(exc_ratios)
+            good_mean = np.mean(exc_ratios[labels == 1])
+            bad_mean = np.mean(exc_ratios[labels == 0])
+            separation = bad_mean - good_mean
+            if separation > best_score:
+                best_score = separation
+                best_ratio = float(candidate)
+
+        return best_ratio
 
     def _find_boundary(self, good_values: list, bad_values: list) -> float:
         """Find threshold separating Good (low) from Bad (high) populations.
@@ -275,17 +311,19 @@ class PercentileBoundaryEstimator:
         for lp_cut in np.arange(0.03, 0.20, 0.01):
             exc_ratios = []
             for sig in all_signals:
-                signal = sig['signal_physical']
-                if len(signal) < 15:
+                # Prefer pixel-space signal; fall back to physical
+                signal = sig.get('signal_vector', sig.get('signal_physical'))
+                if signal is None or len(signal) < 15:
                     exc_ratios.append(0.0)
                     continue
                 try:
                     detrended = signal - np.mean(signal)
-                    b, a = butter(7, min(lp_cut, 0.99), btype='low')
-                    filtered = filtfilt(b, a, detrended)
+                    sos = butter(7, min(lp_cut, 0.99), btype='low', output='sos')
+                    from scipy.signal import sosfiltfilt as _sosfiltfilt
+                    filtered = _sosfiltfilt(sos, detrended)
                     residual = detrended - filtered
-                    med_res = np.median(np.abs(residual))
-                    test_thr = med_res * 2.0 if med_res > 0 else 0.001
+                    max_abs = np.max(np.abs(residual))
+                    test_thr = 0.10 * max_abs if max_abs > 1e-9 else 0.0
                     exc = np.sum(np.abs(residual) > test_thr) / len(residual)
                     exc_ratios.append(exc)
                 except Exception:
@@ -319,7 +357,7 @@ class BayesianThresholdEstimator:
     PARAM_GRIDS = {
         'fft_energy_ratio_threshold': (0.0005, 0.15, 300),
         'exceedance_ratio_threshold': (0.05, 0.99, 300),
-        'residual_threshold': (0.0001, 0.10, 300),
+        'relative_residual_ratio': (0.02, 0.50, 300),
     }
 
     def __init__(self):
@@ -340,12 +378,7 @@ class BayesianThresholdEstimator:
         metric_map = {
             'fft_energy_ratio_threshold': signal_data.get('energy_ratio'),
             'exceedance_ratio_threshold': signal_data.get('exceedance_ratio'),
-            'residual_threshold': (
-                float(np.max(np.abs(signal_data['residual_physical'])))
-                if 'residual_physical' in signal_data
-                   and signal_data['residual_physical'] is not None
-                else None
-            ),
+            'relative_residual_ratio': signal_data.get('relative_residual_ratio'),
         }
 
         for param_name, grid in self.grids.items():
@@ -451,15 +484,36 @@ class ROCYoudenEstimator:
         result['exceedance_ratio_threshold_j'] = j_stat
         result['exceedance_ratio_threshold_auc'] = auc
 
-        # Residual threshold (using max absolute residual per signal)
-        good_res = [float(np.max(np.abs(s['residual_physical'])))
-                    for s in self.good_signals]
-        bad_res = [float(np.max(np.abs(s['residual_physical'])))
-                   for s in self.bad_signals]
-        thr, j_stat, auc = self._youden_threshold(good_res, bad_res)
-        result['residual_threshold'] = thr
-        result['residual_threshold_j'] = j_stat
-        result['residual_threshold_auc'] = auc
+        # Relative residual ratio — sweep candidate ratios, find Youden-optimal
+        candidate_ratios = np.linspace(0.02, 0.50, 100)
+        best_ratio = 0.10
+        best_j = -1.0
+        best_auc = 0.5
+
+        for ratio in candidate_ratios:
+            good_exc = []
+            for s in self.good_signals:
+                res = np.array(s['residual_physical'])
+                mx = float(np.max(np.abs(res))) if len(res) > 0 else 0.0
+                thr_val = ratio * mx if mx > 1e-9 else 0.0
+                good_exc.append(np.sum(np.abs(res) > thr_val) / len(res) if len(res) > 0 else 0.0)
+
+            bad_exc = []
+            for s in self.bad_signals:
+                res = np.array(s['residual_physical'])
+                mx = float(np.max(np.abs(res))) if len(res) > 0 else 0.0
+                thr_val = ratio * mx if mx > 1e-9 else 0.0
+                bad_exc.append(np.sum(np.abs(res) > thr_val) / len(res) if len(res) > 0 else 0.0)
+
+            _thr, j_stat, auc = self._youden_threshold(good_exc, bad_exc)
+            if j_stat > best_j:
+                best_j = j_stat
+                best_ratio = float(ratio)
+                best_auc = auc
+
+        result['relative_residual_ratio'] = best_ratio
+        result['relative_residual_ratio_j'] = best_j
+        result['relative_residual_ratio_auc'] = best_auc
 
         return result
 
@@ -521,6 +575,18 @@ class HybridCalibrationEngine:
         self.good_count: int = 0
         self.bad_count: int = 0
         self._all_signals: List[dict] = []
+
+    def clear_signals(self):
+        """Clear the stored signal pool while preserving computed thresholds.
+
+        Called after ``_finish_calibration()`` so that subsequent live-calibration
+        similarity checks do not compare new signals against the already-committed
+        calibration population. Sub-estimators keep their fitted state — only the
+        raw signal pool and Good/Bad counters are purged.
+        """
+        self._all_signals.clear()
+        self.good_count = 0
+        self.bad_count = 0
 
     def add_signal(self, signal_data: dict, judgment: str):
         """Feed a classified signal to all sub-estimators."""
@@ -606,7 +672,7 @@ class HybridCalibrationEngine:
         threshold_params = [
             'fft_energy_ratio_threshold',
             'exceedance_ratio_threshold',
-            'residual_threshold'
+            'relative_residual_ratio'
         ]
 
         for key in threshold_params:
@@ -640,7 +706,7 @@ class HybridCalibrationEngine:
         threshold_params = [
             'fft_energy_ratio_threshold',
             'exceedance_ratio_threshold',
-            'residual_threshold'
+            'relative_residual_ratio'
         ]
 
         p_dict = perc if perc is not None else {}
@@ -701,6 +767,114 @@ class HybridCalibrationEngine:
                 merged[key] = val
 
         return merged
+
+    def get_distribution_data(self) -> dict:
+        """Return Good/Bad feature values for diagnostic plotting."""
+        good_er = [s['energy_ratio'] for s in self.percentile.good_signals]
+        bad_er = [s['energy_ratio'] for s in self.percentile.bad_signals]
+        good_exc = [s['exceedance_ratio'] for s in self.percentile.good_signals]
+        bad_exc = [s['exceedance_ratio'] for s in self.percentile.bad_signals]
+        good_res = [float(s['max_abs_residual'])
+                    for s in self.percentile.good_signals
+                    if 'max_abs_residual' in s]
+        bad_res = [float(s['max_abs_residual'])
+                   for s in self.percentile.bad_signals
+                   if 'max_abs_residual' in s]
+        return {
+            'fft_energy_ratio': {'good': good_er, 'bad': bad_er},
+            'exceedance_ratio': {'good': good_exc, 'bad': bad_exc},
+            'relative_residual_ratio': {'good': good_res, 'bad': bad_res},
+        }
+
+    def get_roc_data(self) -> Optional[dict]:
+        """Return ROC curve data for each parameter (Level 3+)."""
+        if not self.roc.can_estimate:
+            return None
+        result = {}
+        params = [
+            ('fft_energy_ratio', 'energy_ratio'),
+            ('exceedance_ratio', 'exceedance_ratio'),
+            ('relative_residual_ratio', 'max_abs_residual'),
+        ]
+        for label, key in params:
+            good_vals = [s[key] for s in self.roc.good_signals if key in s]
+            bad_vals = [s[key] for s in self.roc.bad_signals if key in s]
+            if not good_vals or not bad_vals:
+                continue
+            all_vals = sorted(set(good_vals + bad_vals))
+            if len(all_vals) < 2:
+                continue
+            margin = (all_vals[-1] - all_vals[0]) * 0.05
+            candidates = [all_vals[0] - margin] + all_vals + [all_vals[-1] + margin]
+            n_good, n_bad = len(good_vals), len(bad_vals)
+            fprs, tprs = [], []
+            best_j, best_thr = -1.0, 0.0
+            for thr in candidates:
+                tp = sum(1 for v in good_vals if v <= thr)
+                fp = sum(1 for v in bad_vals if v <= thr)
+                tpr = tp / n_good if n_good else 0.0
+                fpr = fp / n_bad if n_bad else 0.0
+                fprs.append(fpr)
+                tprs.append(tpr)
+                j = tpr - fpr
+                if j > best_j:
+                    best_j = j
+                    best_thr = thr
+            # Sort for plotting
+            pts = sorted(zip(fprs, tprs))
+            fprs_sorted = [p[0] for p in pts]
+            tprs_sorted = [p[1] for p in pts]
+            auc = float(np.trapz(tprs_sorted, fprs_sorted))
+            auc = max(0.0, min(1.0, abs(auc)))
+            # Find optimal point
+            opt_tp = sum(1 for v in good_vals if v <= best_thr) / n_good if n_good else 0
+            opt_fp = sum(1 for v in bad_vals if v <= best_thr) / n_bad if n_bad else 0
+            result[label] = {
+                'fpr': fprs_sorted, 'tpr': tprs_sorted, 'auc': auc,
+                'youden_j': best_j, 'optimal_fpr': opt_fp, 'optimal_tpr': opt_tp,
+            }
+        return result
+
+    def get_threshold_history(self) -> dict:
+        """Return threshold estimates at each signal count for convergence plotting."""
+        history = {'count': [], 'fft_energy_ratio': [], 'exceedance_ratio': [], 'relative_residual_ratio': []}
+        if len(self._all_signals) < 6:
+            return history
+        # Replay signals through a temporary engine to get estimates at each step
+        temp = HybridCalibrationEngine()
+        for sig in self._all_signals:
+            judgment = sig.get('judgment', 'IGNORE')
+            sig_copy = dict(sig)
+            for key in ('fft_freqs', 'fft_mags', 'residual_physical', 'signal_physical'):
+                if key in sig_copy and isinstance(sig_copy[key], list):
+                    sig_copy[key] = np.array(sig_copy[key])
+            temp.add_signal(sig_copy, judgment)
+            if temp.can_estimate:
+                est = temp.get_estimates()
+                if est:
+                    history['count'].append(temp.total_signals)
+                    history['fft_energy_ratio'].append(est.get('fft_energy_ratio_threshold'))
+                    history['exceedance_ratio'].append(est.get('exceedance_ratio_threshold'))
+                    history['relative_residual_ratio'].append(est.get('relative_residual_ratio'))
+        return history
+
+    def get_bayesian_ci(self) -> Optional[dict]:
+        """Return Bayesian posterior grids and credible intervals for plotting."""
+        if not self.bayesian.can_estimate:
+            return None
+        result = {}
+        for name, grid in self.bayesian.grids.items():
+            posterior = self.bayesian.posteriors[name]
+            cumulative = np.cumsum(posterior)
+            ci_low_idx = np.searchsorted(cumulative, 0.025)
+            ci_high_idx = np.searchsorted(cumulative, 0.975)
+            result[name] = {
+                'grid': grid.tolist(),
+                'posterior': posterior.tolist(),
+                'ci_low': float(grid[min(ci_low_idx, len(grid)-1)]),
+                'ci_high': float(grid[min(ci_high_idx, len(grid)-1)]),
+            }
+        return result
 
     def to_dict(self) -> dict:
         """Serialise the engine state for JSON persistence."""
@@ -801,7 +975,7 @@ class AnalysisParams:
     fft_energy_ratio_threshold: float = 0.006
     lowpass_cutoff: float = 0.07
     lowpass_filter_order: int = 7
-    residual_threshold: float = 0.005
+    relative_residual_ratio: float = 0.10
     exceedance_ratio_threshold: float = 0.7
 
 @dataclass
@@ -845,10 +1019,16 @@ class AppConfig:
     def lowpass_filter_order(self, v): self.analysis_params['frf'].lowpass_filter_order = v
     
     @property
-    def residual_threshold(self): return self.analysis_params['frf'].residual_threshold
+    def relative_residual_ratio(self): return self.analysis_params['frf'].relative_residual_ratio
+    @relative_residual_ratio.setter
+    def relative_residual_ratio(self, v): self.analysis_params['frf'].relative_residual_ratio = v
+
+    # Backward-compat alias — removed field, redirect to new name
+    @property
+    def residual_threshold(self): return self.analysis_params['frf'].relative_residual_ratio
     @residual_threshold.setter
-    def residual_threshold(self, v): self.analysis_params['frf'].residual_threshold = v
-    
+    def residual_threshold(self, v): self.analysis_params['frf'].relative_residual_ratio = v
+
     @property
     def exceedance_ratio_threshold(self): return self.analysis_params['frf'].exceedance_ratio_threshold
     @exceedance_ratio_threshold.setter
@@ -876,10 +1056,16 @@ class AppConfig:
     def psd_lowpass_filter_order(self, v): self.analysis_params['psd'].lowpass_filter_order = v
     
     @property
-    def psd_residual_threshold(self): return self.analysis_params['psd'].residual_threshold
+    def psd_relative_residual_ratio(self): return self.analysis_params['psd'].relative_residual_ratio
+    @psd_relative_residual_ratio.setter
+    def psd_relative_residual_ratio(self, v): self.analysis_params['psd'].relative_residual_ratio = v
+
+    # Backward-compat alias
+    @property
+    def psd_residual_threshold(self): return self.analysis_params['psd'].relative_residual_ratio
     @psd_residual_threshold.setter
-    def psd_residual_threshold(self, v): self.analysis_params['psd'].residual_threshold = v
-    
+    def psd_residual_threshold(self, v): self.analysis_params['psd'].relative_residual_ratio = v
+
     @property
     def psd_exceedance_ratio_threshold(self): return self.analysis_params['psd'].exceedance_ratio_threshold
     @psd_exceedance_ratio_threshold.setter
@@ -913,7 +1099,12 @@ class AppConfig:
                 params.fft_energy_ratio_threshold = metadata.get(f'{prefix}fft_energy_ratio_threshold', params.fft_energy_ratio_threshold)
                 params.lowpass_cutoff = metadata.get(f'{prefix}lowpass_cutoff', params.lowpass_cutoff)
                 params.lowpass_filter_order = metadata.get(f'{prefix}lowpass_filter_order', params.lowpass_filter_order)
-                params.residual_threshold = metadata.get(f'{prefix}residual_threshold', params.residual_threshold)
+                # Migration: old absolute residual_threshold → new dimensionless relative_residual_ratio
+                if f'{prefix}relative_residual_ratio' in metadata:
+                    params.relative_residual_ratio = metadata[f'{prefix}relative_residual_ratio']
+                elif f'{prefix}residual_threshold' in metadata:
+                    params.relative_residual_ratio = 0.10
+                    logger.info(f"Migrated config: {prefix}residual_threshold → {prefix}relative_residual_ratio (default 0.10)")
                 params.exceedance_ratio_threshold = metadata.get(f'{prefix}exceedance_ratio_threshold', params.exceedance_ratio_threshold)
                 config.analysis_params[sig_type] = params
             config.coherence_threshold = metadata.get('coherence_threshold', config.coherence_threshold)

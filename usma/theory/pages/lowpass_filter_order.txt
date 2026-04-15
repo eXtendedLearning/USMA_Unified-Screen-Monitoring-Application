@@ -1,0 +1,66 @@
+# LP Order
+
+**Parameter:** `lowpass_filter_order` (FRF) / `psd_lowpass_filter_order` (PSD)
+**Default:** `7`
+
+## What it is
+
+The order of the Butterworth filter passed to
+`scipy.signal.butter(order, cutoff, btype='low', output='sos')`.
+
+## Implementation note — effective order is doubled
+
+USMA uses `sosfiltfilt()` (second-order sections with zero-phase filtering).
+`sosfiltfilt` applies the filter **twice** — forward and backward — giving
+an effective order of `2 × lp_order`. At the default order 7, the effective
+roll-off is equivalent to a 14th-order filter.
+
+## Why `sosfiltfilt` instead of `filtfilt(b, a, ...)`
+
+The older `filtfilt(b, a, ...)` approach suffers from ill-conditioned
+polynomial coefficients at high orders and low cutoffs. This was causing
+numerical instability in USMA's analysis at orders ≥ 7.
+
+`sosfiltfilt` is **numerically stable at any order**. The Order spinbox is
+now functional across its full range — but it remains a low-impact tuning
+knob because the filter is already very steep at order ≥ 5.
+
+## Effective order / attenuation table
+
+```
+| Order | Effective order (sosfiltfilt) | Attenuation at 2x cutoff |
+|-------|-------------------------------|--------------------------|
+|   3   |              6                |       ~-72 dB            |
+|   5   |             10                |       ~-120 dB           |
+|   7   |             14                |       ~-168 dB           |
+|   9   |             18                |       ~-216 dB           |
+```
+
+At the default `lp_cutoff = 0.07`, doubling the frequency to `0.14` is
+already deep in the stopband regardless of order. The residual shape is
+dominated by the **cutoff frequency** choice, not the order.
+
+## Practical guidance
+
+**Order is not a useful tuning knob at these settings.** Leave it at 7.
+
+The effective controls for LP behaviour, in order of impact, are:
+
+1. `lp_cutoff`
+2. `relative_residual_ratio`
+3. `exceedance_ratio_threshold`
+
+If you find the LP method misbehaving, adjust those three parameters —
+changing the filter order will produce almost no visible effect.
+
+## Why LP Order "seems to do nothing"
+
+In an ideal LP filter with perfect roll-off, order is irrelevant — any
+order ≥ 1 gives the same result (a hard cutoff). Real Butterworth filters
+are not perfect, so order matters *at the transition band*. But once the
+effective order is ≥ 10 (i.e. `lp_order ≥ 5`), the transition band is
+already narrow enough that further increases are cosmetic. The default of 7
+places you well inside this regime.
+
+---
+See also: lowpass_cutoff, lowpass_method, practical_tuning

@@ -1,0 +1,82 @@
+# Lowpass Method — Overview
+
+Source: `usma/analysis/signal.py`, inside `_analyze_wave_pattern()`.
+
+The Lowpass (LP) method is the second independent analysis run on every
+FRF/PSD ROI. It answers the question: **how pervasively rough are the
+residuals after a smooth envelope is subtracted?**
+
+## What it operates on
+
+The **pixel-space signal** — the same input the FFT method uses, and for the
+same reason: the LP method detects a shape property of the signal, which is
+independent of what physical units it's in.
+
+## The steps
+
+```
+1. Detrend: subtract mean(signal_pixels)
+2. Design a Butterworth lowpass filter:
+      butter(lp_order, lp_cutoff, btype='low', output='sos')
+3. Apply zero-phase filtering:
+      filtered = sosfiltfilt(sos, signal_detrended)
+4. Compute residual:
+      residual = signal_detrended - filtered
+5. max_abs_residual  = max(|residual|)
+6. dynamic_threshold = relative_residual_ratio * max_abs_residual
+7. Count how many residual samples exceed dynamic_threshold
+8. exceedance_ratio  = exceedance_count / N
+9. Flag: lowpass_is_bad = exceedance_ratio > exceedance_ratio_threshold
+```
+
+## Why pixel-space
+
+The LP method's core operation — smooth, subtract, measure residuals —
+detects a **shape property**. A double-hit produces rapid oscillations
+regardless of what units the signal is in. The Butterworth filter separates
+slow from fast components based on normalised spatial frequency, which is
+unit-independent.
+
+Operating on `signal_pixels` eliminates the dependency on correct
+`y_axis_min/max`, which was the single most common source of "calibration
+drift" complaints in earlier versions.
+
+## Why a relative threshold instead of an absolute one
+
+Earlier designs used an absolute `residual_threshold` in physical units
+(e.g. 0.005 g/N). This had two problems:
+
+1. **Scale dependency.** A 1.0 g/N FRF had residuals in a completely
+   different range than a 0.01 g/N FRF — no single threshold could serve
+   both.
+2. **Y-axis coupling.** Miscalibrated `y_axis_min/max` silently shifted the
+   meaning of the threshold.
+
+The relative threshold `relative_residual_ratio × max(|residual|)` is
+dimensionless. It asks: *"what fraction of samples have residuals comparable
+in magnitude to the peak residual?"* This question has the same answer
+regardless of signal scale, units, or Y-axis calibration.
+
+## The edge case: zero-residual signals
+
+If the signal is perfectly smooth (all pixels on the same row, or the filter
+reproduces the signal exactly), then `max_abs_residual ≈ 0`. In this case,
+`dynamic_threshold = 0` and no exceedances are counted — a perfectly smooth
+signal is classified as GOOD.
+
+```
+dynamic_threshold = relative_residual_ratio * max_abs_residual
+                    if max_abs_residual > 1e-9 else 0.0
+```
+
+## Tunable parameters
+
+The LP method exposes four tunable parameters, each with its own page:
+
+- `lowpass_cutoff` — filter cutoff (most impactful)
+- `lowpass_filter_order` — filter order (low impact; leave at 7)
+- `relative_residual_ratio` — dynamic threshold as a fraction of peak residual
+- `exceedance_ratio_threshold` — pass/fail cutoff on the exceedance fraction
+
+---
+See also: lowpass_cutoff, lowpass_filter_order, residual_threshold, exceedance_ratio_threshold, fft_method

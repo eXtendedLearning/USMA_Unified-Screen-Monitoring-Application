@@ -1,0 +1,246 @@
+# The Calibration Engine
+
+Source: `usma/models.py` (`CalibrationSignal`, `PercentileBoundaryEstimator`,
+`BayesianThresholdEstimator`, `ROCYoudenEstimator`,
+`HybridCalibrationEngine`).
+
+USMA's calibration system exists because the threshold parameters
+(`fft_cutoff_frequency`, `fft_energy_ratio_threshold`, `lowpass_cutoff`,
+`relative_residual_ratio`, `exceedance_ratio_threshold`) **cannot be set
+sensibly without a population of labelled signals**. The calibration engine
+takes a stream of user-judged hits — "this one is GOOD", "this one is BAD"
+— and infers the thresholds that best separate the two populations.
+
+The architecture is deliberately **plural**: three independent estimators
+run side-by-side and are merged, because each has different statistical
+assumptions and breaks down at different sample sizes. The merger is
+governed by an ordinal **confidence level** computed from the total number
+of labelled signals.
+
+## The data being calibrated
+
+Each calibration sample is a `CalibrationSignal` containing:
+
+- The reconstructed pixel-space signal and its residuals
+- Its precomputed FFT (`fft_freqs`, `fft_mags`)
+- Current metric values: `energy_ratio`, `exceedance_ratio`, `max_abs_residual`
+- A user judgment: `"GOOD"` or `"BAD"`
+
+The estimators target three primary parameters:
+
+- `fft_energy_ratio_threshold`
+- `exceedance_ratio_threshold`
+- `relative_residual_ratio`
+
+…and (only the percentile estimator) two filter-shape parameters:
+
+- `fft_cutoff_frequency`
+- `lowpass_cutoff`
+
+---
+
+## Estimator 1 — PercentileBoundaryEstimator
+
+**Minimum data:** ≥ 3 GOOD and ≥ 3 BAD.
+
+**Threshold rule:**
+
+```
+max_good = max(good_values)
+min_bad  = min(bad_values)
+
+if min_bad > max_good:
+    threshold = (max_good + min_bad) / 2.0     # cleanly separated
+else:
+    threshold = np.percentile(good_values, 95) # overlapping -> 5% FP on GOOD
+```
+
+If the two populations don't overlap on a given metric, place the threshold
+at the midpoint between the highest GOOD and the lowest BAD. If they
+overlap, pin the threshold at the 95th percentile of the GOOD distribution
+so that no more than 5% of *good* hits get incorrectly flagged.
+
+**Filter-shape sweep:**
+
+For `fft_cutoff_frequency`, USMA sweeps candidates over `[0.02, 0.25]` in
+steps of 0.005. For each candidate it recomputes `energy_ratio` for every
+signal, then scores by **mean separation**:
+
+```
+separation = mean(ratios[bad]) - mean(ratios[good])   # higher = better
+```
+
+The cutoff with highest separation wins. The same procedure is applied to
+`lowpass_cutoff` over `[0.03, 0.20]` in steps of 0.01, and to
+`relative_residual_ratio` over `[0.02, 0.50]` in steps of 0.01.
+
+This is why the Percentile estimator dominates the early phase of
+calibration: it is the **only** one that can also tune filter shape and the
+residual ratio, and it works with as few as 6 signals.
+
+---
+
+## Estimator 2 — BayesianThresholdEstimator
+
+**Minimum data:** ≥ 6 signals total (no per-class minimum).
+
+**Method:** grid-based Bayesian inference with a sigmoid likelihood, one
+independent grid per parameter.
+
+**Grids:**
+
+```
+| Parameter                    | Range         | Grid points |
+|------------------------------|---------------|-------------|
+| fft_energy_ratio_threshold   | 0.0005 - 0.15 |     300     |
+| exceedance_ratio_threshold   | 0.05   - 0.99 |     300     |
+| relative_residual_ratio      | 0.02   - 0.50 |     300     |
+```
+
+**Prior:** uniform over each grid. USMA does not assume any pre-existing
+belief about where the threshold lives.
+
+**Likelihood:** a sigmoid that asks "for each candidate threshold `t`, how
+consistent is the new observation with that being the right cutoff?"
+
+```
+steepness = 20.0 / grid_range     # sharper for narrower ranges
+
+if judgment == "GOOD":
+    # GOOD signals should sit BELOW the threshold
+    likelihood = 1.0 / (1.0 + exp(-steepness * (grid - observed)))
+else:
+    # BAD signals should sit ABOVE the threshold
+    likelihood = 1.0 / (1.0 + exp(-steepness * (observed - grid)))
+
+posterior  = prior * likelihood
+posterior /= posterior.sum()       # renormalise
+```
+
+A GOOD observation makes thresholds *above* the observed value more
+credible; a BAD observation makes thresholds *below* it more credible.
+
+**Point estimate:** the MAP (grid point with highest posterior).
+
+**95% credible interval:** from the posterior CDF,
+
+```
+cumulative  = np.cumsum(posterior)
+ci_low_idx  = np.searchsorted(cumulative, 0.025)
+ci_high_idx = np.searchsorted(cumulative, 0.975)
+```
+
+The GUI displays this as a shaded blue band on the distribution plots.
+Narrow band = sharp posterior = trustworthy threshold. Wide band = collect
+more samples before relying on the estimate.
+
+---
+
+## Estimator 3 — ROCYoudenEstimator
+
+**Minimum data:** ≥ 5 GOOD and ≥ 5 BAD.
+
+**Method:** sweep candidate thresholds and pick the one maximising Youden's
+J statistic on the labelled data.
+
+```
+for thr in candidate_thresholds:
+    tp  = sum(1 for v in good_values if v <= thr)
+    fp  = sum(1 for v in bad_values  if v <= thr)
+    tpr = tp / n_good                 # true positive rate
+    fpr = fp / n_bad                  # false positive rate
+    J   = tpr - fpr                   # Youden's J
+```
+
+The threshold maximising J is the optimal operating point on the ROC curve
+under the assumption that false positives and false negatives are equally
+costly.
+
+For `relative_residual_ratio`, the ROC estimator performs a **nested
+sweep**: for each candidate ratio in `[0.02, 0.50]`, it recomputes the
+exceedance ratio for every signal, then applies Youden's J. The ratio that
+produces the highest J wins.
+
+**AUC** is computed by trapezoidal integration of the sorted (FPR, TPR)
+pairs:
+
+```
+auc = np.trapz(tprs_sorted, fprs_sorted)
+auc = max(0.0, min(1.0, abs(auc)))
+```
+
+The AUC is the headline number on the ROC subplot — it tells you whether
+the metric *itself* is even a good discriminator. AUC ≈ 0.5 means no
+information; AUC > 0.9 means excellent separation.
+
+---
+
+## The hybrid merger and confidence levels
+
+**Confidence level** is ordinal and based on total sample count:
+
+```
+n = total_signals
+if not meets_minimum: return 0
+elif n <=  7:         return 1   # Percentile only
+elif n <= 11:         return 2   # Percentile + Bayesian
+elif n <= 15:         return 3   # All three, 20% agreement tolerance
+else:                 return 4   # All three, 15% agreement tolerance
+```
+
+These cutoffs are **ordinal, not probabilistic**. Level 4 does not mean
+"90% certain"; it means "we have ≥ 16 samples and can afford the strictest
+outlier rejection".
+
+**Merge rules:**
+
+- **Level 1:** use Percentile estimates verbatim.
+
+- **Level 2:** weighted blend (Bayesian gets heavier weight because it has
+  integrated more information per parameter at this sample size):
+  ```
+  merged[key] = 0.4 * percentile[key] + 0.6 * bayesian[key]
+  ```
+
+- **Level 3 / 4:** all three estimates are collected and checked for
+  agreement:
+  ```
+  mean_val   = np.mean(estimates)
+  deviations = [abs(e - mean_val) / mean_val for e in estimates]
+
+  if all(d < agreement_pct for d in deviations):
+      merged[key] = mean_val
+  else:
+      outlier_idx = argmax(deviations)
+      kept        = [e for i, e in enumerate(estimates) if i != outlier_idx]
+      merged[key] = mean(kept)
+  ```
+  `agreement_pct = 0.20` at Level 3, `0.15` at Level 4. So the engine
+  first asks "do all three estimators agree to within 15–20%?" — if yes,
+  average them; if no, drop the most-deviant one and average the
+  remaining two. A poor man's robust mean.
+
+---
+
+## What the engine does NOT do
+
+A few things the engine deliberately does **not** attempt, so you don't go
+looking for them:
+
+- **No likelihood-ratio test** on whether GOOD and BAD distributions are
+  actually distinguishable. The engine will happily produce thresholds even
+  when the classes overlap completely — it is the user's job to look at
+  the calibration plot and notice this.
+- **No correlated multivariate model.** All metrics are calibrated
+  independently; cross-parameter correlations (e.g. high energy ratios
+  coinciding with high exceedance ratios) are visible in the plots but not
+  exploited.
+- **No online learning.** Each refit re-runs all three estimators from
+  scratch on the full session. There is no incremental Bayesian update
+  across sessions.
+- **No automatic re-tuning of `fft_cutoff_frequency` or `lowpass_cutoff`
+  past the initial fit.** Only the Percentile estimator sweeps these, and
+  only when first run.
+
+---
+See also: fft_energy_ratio_threshold, exceedance_ratio_threshold, residual_threshold, practical_tuning, default_parameters

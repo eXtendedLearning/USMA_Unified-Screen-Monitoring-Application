@@ -1,0 +1,87 @@
+# Default Parameters
+
+Source: `AnalysisParams` and `AppConfig` in `usma/models.py`.
+
+This is the **single source of truth** for "what does USMA do out of the
+box?". All thresholds are applied to the pixel-space signal unless noted.
+
+## Analysis parameters (FRF)
+
+```
+| Parameter                    | Default        | Range        | Effect                                 |
+|------------------------------|----------------|--------------|----------------------------------------|
+| fft_cutoff_frequency         | 0.07           | 0.02 - 0.25  | Low / high spatial-frequency boundary  |
+| fft_energy_ratio_threshold   | 0.006          | 0.0001 - 0.1 | Min HF energy fraction to flag BAD     |
+| lowpass_cutoff               | 0.07           | 0.03 - 0.2   | Butterworth cutoff (normalised)        |
+| lowpass_filter_order         | 7              | -            | Butterworth order; effectively 14      |
+|                              |                |              | after sosfiltfilt. Low-impact knob.    |
+| relative_residual_ratio      | 0.10           | 0.02 - 0.50  | Fraction of peak residual amplitude    |
+|                              |                |              | defining the exceedance threshold      |
+| exceedance_ratio_threshold   | 0.7            | 0.2 - 0.99   | Min exceedance fraction to flag BAD    |
+```
+
+## Analysis parameters (PSD — parallel set)
+
+PSD ROIs use a parallel set of analysis parameters with the **same
+defaults** — they exist so PSD and FRF can be tuned independently:
+
+- `psd_fft_cutoff_frequency`
+- `psd_fft_energy_ratio_threshold`
+- `psd_lowpass_cutoff`
+- `psd_lowpass_filter_order`
+- `psd_relative_residual_ratio`
+- `psd_exceedance_ratio_threshold`
+
+## Coherence parameters
+
+```
+| Parameter                 | Default | Range  | Effect                                      |
+|---------------------------|---------|--------|---------------------------------------------|
+| coherence_threshold       | 0.30    | 0 - 1  | Max normalised coherence badness before     |
+|                           |         |        |   warning                                   |
+| coherence_degradation_pct | 0.20    | 0 - 1  | Relative within-run badness increase that   |
+|                           |         |        |   triggers degradation alert                |
+```
+
+## HSV calibration defaults
+
+```
+| Parameter | Default          | Notes                                            |
+|-----------|------------------|--------------------------------------------------|
+| hsv_lower | [  0,   0,   0]  | Per-channel lower bound                          |
+| hsv_upper | [179, 255, 240]  | Upper V capped at 240 to exclude pure white      |
+```
+
+## Monitor loop parameters
+
+```
+| Parameter          | Default | Notes                                       |
+|--------------------|---------|---------------------------------------------|
+| screenshot_interval| 0.25 s  | Polling period of the monitor loop          |
+| hits_per_run       | 5       | Number of hits expected per measurement run |
+| monitor_index      | 1       | Which physical monitor to capture           |
+```
+
+## Design intent of the defaults
+
+The defaults are tuned for **typical modal-test / impact-hammer FRF
+measurements on a well-coupled structure**. The design priorities are:
+
+1. **Low false-positive rate on clean hits** — `exceedance_ratio_threshold`
+   is intentionally high (0.7) and `fft_energy_ratio_threshold` is
+   intentionally low (0.006). The result is an LP method that fires only
+   on pervasively rough signals, and an FFT method that picks up even
+   modest HF content.
+2. **Numerical stability across reasonable filter orders** — `lp_order = 7`
+   gives an effective 14th-order filter via `sosfiltfilt`, steep enough
+   that the choice is essentially decoupled from the roll-off shape.
+3. **Scale-invariance** — the relative residual ratio is dimensionless, so
+   defaults work regardless of signal units or amplitude range.
+
+If your measurements differ systematically from this default profile
+(e.g. very noisy instrumentation, log-scale plots, uncommon colour
+schemes), use the **calibration engine** rather than hand-tuning. It will
+find defaults appropriate to your specific data.
+
+---
+See also: fft_method, lowpass_method, coherence_analysis, calibration_engine, practical_tuning

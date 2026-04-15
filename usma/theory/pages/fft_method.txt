@@ -1,0 +1,57 @@
+# FFT Method — Overview
+
+Source: `usma/analysis/signal.py`, inside `_analyze_wave_pattern()`.
+
+The FFT method is one of the two independent analyses USMA runs on every
+FRF/PSD ROI. It answers a single, structural question: **how much of this
+signal's energy sits at high spatial frequencies?**
+
+## What it operates on
+
+The **pixel-space signal** (raw column positions of the detected colour
+trace), not the physical-unit signal. The reason is that the frequency content
+of interest is a structural property of the *shape* of the signal, independent
+of what physical units it's in.
+
+This means the FFT method is immune to Y-axis miscalibration: regardless of
+whether `y_axis_min/max` is set correctly, the FFT shape-analysis is the same.
+
+## The steps
+
+```
+1. Detrend: subtract the mean from signal_pixels
+2. Apply rfft() -> complex spectrum
+3. Compute magnitude spectrum: fft_mags = abs(yf)
+4. Build normalised frequency axis with rfftfreq(N, 1) -> values 0 to 0.5 (Nyquist)
+5. Compute high_freq_energy = sum of fft_mags**2 above fft_cutoff_frequency
+6. Compute energy_ratio = high_freq_energy / total_energy
+7. Flag: fft_is_bad = energy_ratio > fft_energy_ratio_threshold
+```
+
+The signal is **not** sampled in time — it's sampled in pixels horizontally
+across the ROI. So frequencies produced by the FFT are **spatial**
+frequencies, in cycles/pixel.
+
+## Intuition
+
+A clean, smooth FRF/PSD signal changes slowly across the ROI, so most of its
+energy sits at low spatial frequencies. A noisy or double-hit signal has rapid
+oscillations, elevating high-frequency energy. The FFT method measures the
+ratio of high-frequency energy to total energy and flags the signal as BAD
+once it exceeds a threshold.
+
+## What the FFT method does NOT do
+
+- It does not operate on the physical signal. The result is identical for
+  miscalibrated Y-axes.
+- It does not model noise separately from the signal — everything above the
+  cutoff is treated as "high-frequency energy".
+- It does not depend on the Lowpass method in any way. Both methods vote
+  independently and feed into the classifier.
+
+The two tunable parameters live on their own pages: `fft_cutoff_frequency`
+(where the low/high boundary sits) and `fft_energy_ratio_threshold` (the
+pass/fail cutoff on the resulting ratio).
+
+---
+See also: fft_cutoff_frequency, fft_energy_ratio_threshold, lowpass_method, hit_classification

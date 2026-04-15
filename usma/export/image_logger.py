@@ -213,26 +213,29 @@ class ImageLogger:
         
             num_points = len(resid)
             freq_axis = np.linspace(region.x_axis_min, region.x_axis_max, num_points)
-            threshold = self.app_config.residual_threshold
-        
-            ax.plot(freq_axis, resid, 'c-', linewidth=1, label='Residual (HF Content)')
+            # Use the dynamic threshold computed at analysis time (pixel-space)
+            threshold = frf_result.dynamic_threshold
+
+            ax.plot(freq_axis, resid, 'c-', linewidth=1, label='Residual (px)')
             ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
-            ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5, 
-                      label=f'Threshold (±{threshold} {region.y_axis_unit})')
-            ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
-        
+            if threshold > 0:
+                ax.axhline(y=threshold, color='r', linestyle='-.', linewidth=1.5,
+                          label=f'±{threshold:.1f} px')
+                ax.axhline(y=-threshold, color='r', linestyle='-.', linewidth=1.5)
+
             exceedances = np.abs(resid) > threshold
             if np.any(exceedances):
-                ax.scatter(freq_axis[exceedances], resid[exceedances], 
+                ax.scatter(freq_axis[exceedances], resid[exceedances],
                           c='red', s=15, zorder=5, alpha=0.7)
-        
+
             classification = "BAD HIT" if frf_result.lowpass_is_bad_hit else "GOOD HIT"
+            ratio_pct = (frf_result.dynamic_threshold / frf_result.max_abs_residual * 100) if frf_result.max_abs_residual > 1e-9 else 0
             residual_info = (f'Exceedances: {frf_result.exceedance_count} ({frf_result.exceedance_ratio:.1%}) | '
-                            f'Threshold: {self.app_config.exceedance_ratio_threshold:.1%} | {classification}')
-            ax.set_title(f'Residual Analysis\n{title_info}\n{residual_info}', 
+                            f'Thr: {ratio_pct:.0f}% of max | {classification}')
+            ax.set_title(f'Residual Analysis (px)\n{title_info}\n{residual_info}',
                         color='white', fontsize=9)
             ax.set_xlabel('Frequency (Hz)', color='white')
-            ax.set_ylabel(f'Residual ({region.y_axis_unit})', color='white')
+            ax.set_ylabel('Residual (pixels)', color='white')
             ax.set_facecolor('#2E2E2E')
             ax.tick_params(axis='both', colors='white')
             ax.legend(facecolor='#2E2E2E', labelcolor='white', loc='upper right')

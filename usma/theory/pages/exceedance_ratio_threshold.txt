@@ -1,0 +1,59 @@
+# Exceedance Ratio Threshold
+
+**Parameter:** `exceedance_ratio_threshold` (FRF) /
+`psd_exceedance_ratio_threshold` (PSD)
+**Default:** `0.7`
+**Range:** `0.2 – 0.99`
+
+## What it is
+
+The minimum fraction of samples (0 to 1) that must exceed the dynamic
+threshold before the Lowpass method flags the signal as BAD.
+
+## What it does
+
+```
+exceedance_count = sum(|residual[i]| > dynamic_threshold for i in range(N))
+exceedance_ratio = exceedance_count / N
+
+lowpass_is_bad   = exceedance_ratio > exceedance_ratio_threshold
+```
+
+So if `0.7` (70%) or more of all samples have residuals larger than
+`dynamic_threshold`, it's flagged BAD.
+
+## Why the default is 0.7 (intentionally permissive)
+
+`0.7` is deliberately high — requiring **70%** of the signal to be "rough"
+before flagging BAD. This means the LP method, at default settings, only
+fires on **pervasively rough** signals: double-hits that rattle across the
+whole response window, overload-clipped traces, broken cables.
+
+The permissive default reflects how `relative_residual_ratio` is defined:
+even clean signals routinely produce exceedance ratios in the 0.3–0.6 range
+because "10% of max" is very small when max is small. Setting the threshold
+lower would flag virtually everything clean.
+
+## Effect of changing it
+
+- **Lower threshold** (e.g. 0.7 → 0.3) → LP method is more sensitive →
+  signals with even partial roughness get flagged BAD.
+- **Higher threshold** (e.g. 0.7 → 0.9) → LP method is stricter → only the
+  roughest signals fail.
+
+If you want the LP method to detect localised spike-type bad hits rather
+than pervasive roughness, lower this threshold **and** lower
+`relative_residual_ratio` in tandem — both are needed.
+
+## Calibration
+
+All three estimators target this parameter:
+
+- **Percentile:** midpoint or 95th percentile rule on the Good/Bad
+  populations' `exceedance_ratio` values.
+- **Bayesian:** grid search over `[0.05, 0.99]`, 300 grid points, sigmoid
+  likelihood.
+- **ROC/Youden:** threshold maximising Youden's J on the labelled data.
+
+---
+See also: residual_threshold, lowpass_method, lowpass_cutoff, calibration_engine, practical_tuning

@@ -1,0 +1,74 @@
+# Practical Tuning Guide
+
+A quick lookup table for "I want X behaviour — which knob do I turn?".
+
+## Goal → Knob table
+
+```
+| Goal                                          | Knob to turn                                       |
+|-----------------------------------------------|----------------------------------------------------|
+| FFT method too sensitive (many false BADs)    | Raise fft_energy_ratio_threshold or raise          |
+|                                               |   fft_cutoff_frequency                             |
+| FFT method not sensitive enough               | Lower fft_energy_ratio_threshold or lower          |
+|                                               |   fft_cutoff_frequency                             |
+| LP method not firing at all                   | Lower exceedance_ratio_threshold (e.g. 0.7 -> 0.3) |
+|                                               |   or lower relative_residual_ratio                 |
+| LP method firing on clean hits                | Raise relative_residual_ratio or raise             |
+|                                               |   exceedance_ratio_threshold                       |
+| LP Order                                      | Leave at 7. Numerically stable via sosfiltfilt but |
+|                                               |   still low-impact.                                |
+| Whole mask is wrong (signal gaps, noise)      | Re-do HSV calibration                              |
+| Calibration thresholds feel off               | Clear calibration and recollect signals            |
+|                                               |   (ideally >= 16 for Level 4)                      |
+| Too many "Similar signal" popups              | Expected if you repeat the same hit. Click         |
+|                                               |   through - each unique hit will be accepted.      |
+| Coherence flagging when hits look fine        | Normal. Coherence is a separate measurement-       |
+|                                               |   quality channel and does not cause BAD verdicts. |
+```
+
+## Parameter map summary
+
+Only six parameters really matter for tuning:
+
+- **`fft_cutoff_frequency`** — boundary between "slow" and "fast" spatial
+  frequencies for the FFT energy ratio.
+- **`fft_energy_ratio_threshold`** — pass/fail cutoff on the resulting
+  ratio.
+- **`lowpass_cutoff`** — Butterworth cutoff for smooth-envelope extraction.
+- **`lowpass_filter_order`** — **leave at 7**. Non-impactful above order 5
+  with `sosfiltfilt`.
+- **`relative_residual_ratio`** — dynamic threshold as a fraction of peak
+  residual.
+- **`exceedance_ratio_threshold`** — fraction of samples that must exceed
+  the dynamic threshold before LP votes BAD.
+
+The first four control the **FFT method**; the last three (plus
+`lowpass_cutoff`) control the **LP method**.
+
+## The single biggest insight
+
+**LP Order is not a real tuning knob** at current defaults. The effective
+parameters controlling LP sensitivity are, in order of impact:
+
+1. `lp_cutoff`
+2. `relative_residual_ratio`
+3. `exceedance_ratio_threshold`
+
+If you find yourself reaching for the Order spinbox, step back and adjust
+one of these three first. Order becomes relevant only at very low values
+(≤ 3), which are not useful for this analysis anyway.
+
+## Calibration is almost always the right answer
+
+If thresholds feel wrong and you have labelled data, **run calibration**
+rather than hand-tuning. The calibration engine will sweep ranges of each
+parameter and find the values that best separate your Good and Bad
+populations on **your** specific data. Hand-tuned thresholds from one
+instrument rarely transfer perfectly to another.
+
+Collecting ≥ 16 signals (≥ 8 Good + ≥ 8 Bad) takes calibration to
+**Level 4**, where all three estimators agree. This is typically enough
+for robust, reusable thresholds.
+
+---
+See also: calibration_engine, fft_method, lowpass_method, default_parameters

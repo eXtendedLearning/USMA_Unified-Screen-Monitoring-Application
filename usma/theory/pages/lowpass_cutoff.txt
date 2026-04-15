@@ -1,0 +1,62 @@
+# LP Cutoff
+
+**Parameter:** `lowpass_cutoff` (FRF) / `psd_lowpass_cutoff` (PSD)
+**Default:** `0.07`
+**Range:** `0.03 – 0.2`
+
+## What it is
+
+The **normalised cutoff frequency** of the Butterworth lowpass filter used to
+extract a smooth envelope from the pixel-space signal. The normalisation is
+the same as the FFT method's: 0 to 1.0, where 1.0 = Nyquist. In practice the
+useful range stays below ~0.4.
+
+## What it does
+
+Everything **below** this frequency passes through the filter unchanged.
+Everything **above** it is attenuated.
+
+- The **filtered** signal is the "smooth envelope" — what the signal looks
+  like once its rapid oscillations are removed.
+- The **residual** = signal − filtered = what was left over after smoothing.
+
+```
+filtered         = sosfiltfilt(butter(order, cutoff, 'low', output='sos'),
+                               signal_detrended)
+residual         = signal_detrended - filtered
+max_abs_residual = max(|residual|)
+```
+
+## Intuition
+
+Think of the lowpass filter as drawing a smooth curve through the signal.
+The residual is the jagged deviation between the actual signal and that
+smooth curve.
+
+- A **good hit** has tiny, uniformly distributed residuals (the signal *is*
+  smooth).
+- A **bad hit** — rattling, double-hit, overload — has large, non-uniform
+  residuals.
+
+## Effect of changing it
+
+- **Lower cutoff** → tighter smoothing → more of the signal ends up in the
+  residual → more exceedances → **easier to flag BAD**.
+- **Higher cutoff** → looser smoothing → only very rapid oscillations end up
+  in the residual → fewer exceedances → **harder to flag**.
+
+## Why 0.07
+
+The default matches the FFT cutoff default — but this is **coincidence, not
+coupling**. The two parameters are independently tuned and independently
+calibrated.
+
+## Calibration
+
+Only the `PercentileBoundaryEstimator` sweeps this parameter. Candidates are
+tested over `[0.03, 0.20]` in steps of 0.01. For each candidate, it re-runs
+the LP residual computation on pixel-space signals and picks the cutoff that
+maximises mean separation between Good and Bad `exceedance_ratio` values.
+
+---
+See also: lowpass_method, lowpass_filter_order, residual_threshold, exceedance_ratio_threshold, practical_tuning

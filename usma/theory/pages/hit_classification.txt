@@ -1,0 +1,82 @@
+# Hit Classification
+
+Source: `usma/analysis/classifier.py` (`HitClassifier.classify_hit`).
+
+## The four method votes
+
+Each frame produces up to **four method votes** from the two independent
+analyses running on each signal type:
+
+- FRF-FFT
+- FRF-LP (Lowpass)
+- PSD-FFT
+- PSD-LP
+
+Each method independently outputs BAD or not-BAD. Coherence is **not** part
+of the hit verdict — it is a separate measurement-quality channel (see the
+coherence_analysis page).
+
+Each of the four methods can be individually **enabled or disabled** in the
+config. Disabled methods do not cast a vote.
+
+## The voting logic
+
+- Let `any_bad` = at least one enabled method voted BAD.
+- Let `all_bad` = both the FRF side **and** the PSD side have at least one
+  BAD vote (when both sides exist). If only one side exists, `all_bad`
+  requires **both** methods on that side to be BAD.
+
+Then:
+
+```
+not any_bad  ->  GOOD HIT       (green)
+all_bad      ->  BAD HIT (...)  (red)
+otherwise    ->  SUSPECT (...)  (orange)
+```
+
+The parenthetical lists every failing method, e.g. `"FRF-FFT+PSD-LP"`.
+
+## Plain-words summary
+
+A single failing method on a single signal type is **never enough** to fail
+a hit outright — it always demotes it to SUSPECT first.
+
+A SUSPECT hit becomes a BAD hit only when **both** the FRF and PSD signal
+types independently agree there is a problem. (Or, when only one signal
+type exists in the configuration, when both methods on that side agree.)
+
+## Why "one-method failure → SUSPECT, not BAD"
+
+The four methods are not redundant — they detect different kinds of
+problems:
+
+- FFT methods detect high-frequency ripple (numerical noise, double-hit
+  patterns).
+- LP methods detect pervasive roughness (overload, clipping, rattle).
+
+A single method firing could be a genuine problem or a threshold tuning
+artefact. Requiring cross-signal-type agreement (FRF AND PSD) before
+issuing a BAD verdict reduces false positives substantially, while still
+flagging the hit as SUSPECT for user review.
+
+## Reading the detail string
+
+The parenthetical is ordered FRF first, then PSD, then concatenated by `+`.
+Example interpretations:
+
+- `"FRF-FFT"`   → only FRF-FFT failed → **SUSPECT**
+- `"FRF-LP"`    → only FRF-LP failed  → **SUSPECT**
+- `"FRF-FFT+FRF-LP"` → both FRF methods failed, PSD clean → still **SUSPECT**
+  (because the PSD side agreed the hit was fine)
+- `"FRF-FFT+PSD-LP"` → cross-signal-type agreement → **BAD**
+- `"FRF-LP+PSD-FFT+PSD-LP"` → three methods failed → **BAD**
+
+## Per-method indicator lights
+
+The GUI shows four indicator lights (FRF-FFT, FRF-LP, PSD-FFT, PSD-LP),
+each individually coloured to reflect that method's vote on the current
+hit. A light being red does not by itself cause a BAD verdict — the
+classifier applies the voting logic above to the combined state.
+
+---
+See also: fft_method, lowpass_method, calibration_engine, coherence_analysis

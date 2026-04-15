@@ -28,6 +28,7 @@ from usma.utils import load_app_config
 from usma.gui.dialogs import ROITypeDialog
 from usma.gui.hsv_calibration import HSVCalibrationWindow
 from usma.gui.overlay import RegionOverlay
+from usma.theory.wiki_viewer import show_theory_page
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,12 @@ class ConfigToolWindow(tk.Toplevel):
         ttk.Label(g2, text="Scale:").pack(side=tk.LEFT, padx=(5,0))
         ttk.Combobox(g2, textvariable=self.editor_vars['y_scale_type'],
                      values=['linear', 'dB', 'log', 'ln'], state='readonly', width=6).pack(side=tk.LEFT, padx=2)
+        # ⓘ → signal reconstruction theory (why Y-axis bounds matter)
+        _y_info = tk.Label(g2, text="\u24D8", font=("Segoe UI", 10),
+                           fg="#5DADE2", cursor="hand2")
+        _y_info.bind("<Button-1>",
+                     lambda e: show_theory_page(self, "signal_reconstruction"))
+        _y_info.pack(side=tk.LEFT, padx=2)
 
         # Unit hint label (shown below axis scaling, changes per ROI type)
         self.axis_unit_hint_label = ttk.Label(self.f_scale, text="", foreground="gray", font=("Segoe UI", 8, "italic"))
@@ -242,7 +249,7 @@ class ConfigToolWindow(tk.Toplevel):
             'fft_energy_ratio_threshold': tk.DoubleVar(value=self.app_config.fft_energy_ratio_threshold),
             'lowpass_cutoff': tk.DoubleVar(value=self.app_config.lowpass_cutoff),
             'lowpass_filter_order': tk.IntVar(value=self.app_config.lowpass_filter_order),
-            'residual_threshold': tk.DoubleVar(value=self.app_config.residual_threshold),
+            'relative_residual_ratio': tk.DoubleVar(value=self.app_config.relative_residual_ratio),
             'exceedance_ratio_threshold': tk.DoubleVar(value=self.app_config.exceedance_ratio_threshold)
         }
         
@@ -272,11 +279,11 @@ class ConfigToolWindow(tk.Toplevel):
         
         lp_row2 = ttk.Frame(g_lp)
         lp_row2.pack(fill=tk.X, padx=2, pady=2)
-        ttk.Label(lp_row2, text="Res.Thr:").pack(side=tk.LEFT)
-        ttk.Spinbox(lp_row2, from_=0.0001, to=0.1, increment=0.0005, 
-                   textvariable=self.param_vars['residual_threshold'], width=8, format="%.4f").pack(side=tk.LEFT, padx=2)
+        ttk.Label(lp_row2, text="Res.Ratio(%):").pack(side=tk.LEFT)
+        ttk.Spinbox(lp_row2, from_=0.01, to=0.50, increment=0.01,
+                   textvariable=self.param_vars['relative_residual_ratio'], width=8, format="%.2f").pack(side=tk.LEFT, padx=2)
         ttk.Label(lp_row2, text="Exc.Ratio:").pack(side=tk.LEFT)
-        ttk.Spinbox(lp_row2, from_=0.01, to=0.99, increment=0.01, 
+        ttk.Spinbox(lp_row2, from_=0.01, to=0.99, increment=0.01,
                    textvariable=self.param_vars['exceedance_ratio_threshold'], width=6).pack(side=tk.LEFT, padx=2)
         
         ttk.Button(params_frame, text="Apply Parameters", command=self._apply_params).pack(fill=tk.X, pady=5, padx=5)
@@ -452,7 +459,7 @@ class ConfigToolWindow(tk.Toplevel):
         self.app_config.fft_energy_ratio_threshold = self.param_vars['fft_energy_ratio_threshold'].get()
         self.app_config.lowpass_cutoff = self.param_vars['lowpass_cutoff'].get()
         self.app_config.lowpass_filter_order = self.param_vars['lowpass_filter_order'].get()
-        self.app_config.residual_threshold = self.param_vars['residual_threshold'].get()
+        self.app_config.relative_residual_ratio = self.param_vars['relative_residual_ratio'].get()
         self.app_config.exceedance_ratio_threshold = self.param_vars['exceedance_ratio_threshold'].get()
         self.app_config.monitor_index = self.monitor_index_var.get()
         messagebox.showinfo("Success", "Analysis parameters updated.", parent=self)
@@ -478,7 +485,7 @@ class ConfigToolWindow(tk.Toplevel):
         self.param_vars['fft_energy_ratio_threshold'].set(self.app_config.fft_energy_ratio_threshold)
         self.param_vars['lowpass_cutoff'].set(self.app_config.lowpass_cutoff)
         self.param_vars['lowpass_filter_order'].set(self.app_config.lowpass_filter_order)
-        self.param_vars['residual_threshold'].set(self.app_config.residual_threshold)
+        self.param_vars['relative_residual_ratio'].set(self.app_config.relative_residual_ratio)
         self.param_vars['exceedance_ratio_threshold'].set(self.app_config.exceedance_ratio_threshold)
         self._redraw_regions_on_canvas()
         self._update_hsv_button_state()  # Update HSV button state
@@ -573,14 +580,14 @@ class ConfigToolWindow(tk.Toplevel):
                 'fft_energy_ratio_threshold': self.app_config.fft_energy_ratio_threshold,
                 'lowpass_cutoff': self.app_config.lowpass_cutoff,
                 'lowpass_filter_order': self.app_config.lowpass_filter_order,
-                'residual_threshold': self.app_config.residual_threshold,
+                'relative_residual_ratio': self.app_config.relative_residual_ratio,
                 'exceedance_ratio_threshold': self.app_config.exceedance_ratio_threshold,
                 # --- v0.6.0 PSD parameters ---
                 'psd_fft_cutoff_frequency': self.app_config.psd_fft_cutoff_frequency,
                 'psd_fft_energy_ratio_threshold': self.app_config.psd_fft_energy_ratio_threshold,
                 'psd_lowpass_cutoff': self.app_config.psd_lowpass_cutoff,
                 'psd_lowpass_filter_order': self.app_config.psd_lowpass_filter_order,
-                'psd_residual_threshold': self.app_config.psd_residual_threshold,
+                'psd_relative_residual_ratio': self.app_config.psd_relative_residual_ratio,
                 'psd_exceedance_ratio_threshold': self.app_config.psd_exceedance_ratio_threshold,
                 # --- v0.6.0 Coherence parameters ---
                 'coherence_threshold': self.app_config.coherence_threshold,

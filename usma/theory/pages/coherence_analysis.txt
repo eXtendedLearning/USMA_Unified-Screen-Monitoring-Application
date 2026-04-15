@@ -1,0 +1,88 @@
+# Coherence Analysis
+
+Source: `usma/analysis/coherence.py` (`CoherenceAnalyzer.analyze`).
+
+Coherence ROIs are treated **separately** from FRF/PSD ROIs because the
+coherence function γ²(f) lives in the bounded interval `[0, 1]` and its
+degradation has a natural physical interpretation: **how much of the
+response at each frequency is *not* explained by the input**.
+
+Coherence is a measurement-quality channel — it does NOT participate in the
+hit verdict (GOOD / SUSPECT / BAD). It is reported alongside for context.
+
+## The badness integral
+
+USMA inverts coherence and integrates it across the visible frequency band:
+
+```
+inverted_signal    = 1.0 - signal_physical         # signal_physical = gamma^2 in [0,1]
+badness_integral   = np.trapezoid(inverted_signal, freq_axis)
+freq_span          = max(region.x_axis_max - region.x_axis_min, 1.0)
+normalized_badness = badness_integral / freq_span
+```
+
+`normalized_badness` is therefore the **average value of (1 − γ²)** over
+the visible frequency range. It is dimensionless and lives in `[0, 1]`.
+
+- `0.0` → perfect coherence everywhere
+- `1.0` → zero coherence everywhere
+- Typical "good" measurement → `0.05 – 0.15`
+- Anything above `coherence_threshold` (default `0.30`) is flagged
+
+The frequency-span normalisation is critical: it makes the metric
+**scale-invariant with respect to the visible band**. A user who zooms into a
+narrow band gets directly comparable numbers to a user looking at the full
+sweep — provided `region.x_axis_min/max` are correctly set.
+
+## Per-band badness
+
+The same calculation is repeated on four equal-width sub-bands:
+
+```
+band_size = n // 4
+for i in range(4):
+    start_i = i * band_size
+    end_i   = (i + 1) * band_size if i < 3 else n
+    band_inv  = inverted_signal[start_i:end_i]
+    band_freq = freq_axis[start_i:end_i]
+    band_badness.append(
+        np.trapezoid(band_inv, band_freq) /
+        max(band_freq[-1] - band_freq[0], 1.0)
+    )
+```
+
+This gives a 4-element vector that lets the GUI highlight *which* part of
+the spectrum is degrading — useful for spotting localised resonance or
+anti-resonance problems that an averaged metric would smooth out.
+
+## Run-level degradation tracking
+
+In addition to instantaneous badness, USMA tracks how badness evolves
+**within a measurement run**. If `normalized_badness` increases by more than
+`coherence_degradation_pct` (default `0.20` = 20%) compared to the start of
+the run, the GUI raises a degradation warning. This is a lightweight trend
+detector, not a statistical test — it is purely a relative-change check.
+
+## Metrics summary
+
+```
+| Metric             | Symbol  | Formula                              | Default flag |
+|--------------------|---------|--------------------------------------|--------------|
+| Mean coherence     | gamma^2 | mean(signal_physical)                |     -        |
+| Min coherence      | min     | min(signal_physical)                 |     -        |
+| Normalised badness | B       | integral(1 - gamma^2) df / delta_f   |   > 0.30     |
+| Per-band badness   | B_k     | integral_band(1 - gamma^2) / delta_f |     -        |
+| Degradation        | dB/B0   | (B - B_run_start) / B_run_start      |   > 0.20     |
+```
+
+## Coherence is decoupled from classification
+
+Coherence is never an input to the GOOD/SUSPECT/BAD verdict. It is a
+separate channel displayed alongside the hit classification. This is an
+intentional design choice: coherence degradation is a **measurement-setup**
+problem (loose sensor, weak SNR, boundary condition issues), whereas the
+hit classification is a **per-hit quality** problem (rattling, double-hit,
+overload). The two should not be conflated.
+
+---
+See also: hit_classification, default_parameters

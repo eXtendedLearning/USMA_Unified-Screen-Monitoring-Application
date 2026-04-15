@@ -1,0 +1,62 @@
+# Signal Reconstruction and Y-axis Calibration
+
+Source: `usma/analysis/signal.py` (`SignalAnalyzer._reconstruct_signal`).
+
+Before any analysis runs, USMA must turn an HSV-masked ROI image into a
+one-dimensional signal in physical units (g/N, m/s², dimensionless coherence,
+etc.). This step is silent but it is the **foundation** on which everything
+else stands — if it is wrong, every threshold that follows is wrong.
+
+## From mask to pixel signal
+
+The HSV mask marks pixels belonging to the trace as white. For each column `x`
+of the ROI, USMA computes the **mean row** of all white pixels in that column.
+Columns with no white pixels are filled by linear interpolation from
+neighbouring columns.
+
+```
+y_coords, x_coords = np.nonzero(mask)
+unique_x, idx      = np.unique(x_coords, return_inverse=True)
+sum_y              = np.bincount(idx, weights=y_coords)
+count_y            = np.bincount(idx)
+anchor_y           = sum_y / count_y                # mean row per column
+signal_pixels      = np.interp(np.arange(width), unique_x, anchor_y)
+signal_pixels      = height - signal_pixels         # invert (image Y grows downward)
+```
+
+The result, `signal_pixels`, has length equal to the ROI width. Each sample is
+a Y position measured in pixels from the bottom of the ROI.
+
+## From pixel signal to physical signal
+
+USMA assumes the ROI's vertical axis is **linearly calibrated** between two
+user-supplied bounds, `region.y_axis_min` and `region.y_axis_max`. The
+conversion is a single affine map:
+
+```
+signal_physical[i] = y_axis_min + (signal_pixels[i] / height) * (y_axis_max - y_axis_min)
+```
+
+## Why this matters
+
+- **Pixel-space and physical-space are NOT the same signal.** They differ by a
+  constant scale and offset.
+- **Spatial frequency in pixels is invariant** under the affine map, which is
+  why the FFT method works on `signal_pixels` directly. It cares about the
+  *shape* of the signal, not its amplitude.
+- **The Lowpass method also works on `signal_pixels`.** Both analysis methods
+  operate in pixel-space, making them immune to Y-axis miscalibration. The
+  physical signal is retained for display and UNV export purposes only.
+
+## Linear-axis assumption
+
+USMA does **not** support log-Y axes. If the source plot uses a log scale, the
+reconstructed `signal_physical` is wrong by a non-linear factor. Since both
+analysis methods operate on pixel-space, the log-scale issue is limited to
+display and export — but the energy ratios are still biased towards low
+frequencies on log-scale signals, and the LP residual shape will differ from
+what a linear-scale signal would produce. There is no autodetection: the user
+must ensure the source plot is linear.
+
+---
+See also: fft_method, lowpass_method, hsv_calibration

@@ -1,0 +1,98 @@
+# HSV Colour Calibration
+
+Source: `usma/gui/hsv_calibration.py`.
+
+Although it doesn't look like a "math" topic, HSV calibration is a
+**thresholding operation** that determines which pixels make it into the
+signal at all. Mistakes here propagate everywhere downstream — if the mask
+is wrong, the reconstructed signal is wrong, and every threshold the rest of
+USMA applies is operating on corrupt data.
+
+## The thresholding operation
+
+USMA stores three lower bounds and three upper bounds:
+
+```
+hsv_lower = [H_min, S_min, V_min]
+hsv_upper = [H_max, S_max, V_max]
+```
+
+The mask is computed by OpenCV's per-channel `inRange`:
+
+```
+hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+mask = cv2.inRange(hsv, np.array(hsv_lower), np.array(hsv_upper))
+```
+
+This is a logical AND across the three channels: a pixel is white in the
+mask **iff** `H_min ≤ H ≤ H_max` AND `S_min ≤ S ≤ S_max` AND
+`V_min ≤ V ≤ V_max`.
+
+## Channel ranges (OpenCV convention)
+
+```
+| Channel     | Range  | Notes                                        |
+|-------------|--------|----------------------------------------------|
+| Hue (H)     | 0-179  | 8-bit, NOT 0-360 - careful when copy-pasting |
+|             |        | values from external HSV pickers             |
+| Saturation  | 0-255  |                                              |
+| Value       | 0-255  |                                              |
+```
+
+The Hue range is the most common source of user mistakes. Most online HSV
+pickers use 0–360° for hue (full degrees around the colour wheel). OpenCV
+divides that by two to fit in 8 bits: 0–179. A "red" you see written as
+`H=0` or `H=360` in a picker becomes `H=0` or `H=179` in USMA.
+
+## Defaults
+
+```
+hsv_lower = [  0,   0,   0]
+hsv_upper = [179, 255, 240]
+```
+
+The upper **Value** is capped at **240** deliberately, to exclude pure
+white (255). Most plot backgrounds and gridlines are exactly `V=255`;
+capping at 240 filters them out without requiring the user to tune the V
+channel.
+
+## No auto-clustering
+
+USMA's HSV calibration is **purely interactive**. There is no k-means on
+the selected pixels, no Otsu-style automatic thresholding, no statistical
+estimation of Hue mode and spread. The user adjusts six sliders by hand
+and watches the live preview update.
+
+**Why no auto-clustering?** Plot traces are not a stationary distribution.
+Anti-aliasing edges, gridline crossings, and dashed segments mean any
+data-driven estimator has to deal with several distinct sub-populations of
+pixels, and tends to produce overly tight bounds that cut out parts of
+the trace. Manual tuning is faster and more reliable in this domain.
+
+## The preview window
+
+The HSV calibration window stacks three panels vertically:
+
+1. The **original** ROI image (top)
+2. The current **binary mask**, white-on-black (middle)
+3. The **original** ROI with the mask applied — only in-range pixels
+   visible (bottom)
+
+All three update live as the six sliders move. There is no histogram plot
+of pixel HSV values — the tuning is purely "does the mask look right?".
+
+## How to check your mask is good
+
+- The **middle panel** should show a continuous, single-pixel-wide white
+  curve tracing the plot line across the whole ROI. Gaps mean a pixel
+  column had no white pixels and will be filled by linear interpolation
+  (potentially wrong).
+- The **bottom panel** should show the original trace visible and
+  everything else (background, gridlines, axis labels) blacked out.
+- Gridlines appearing in the mask means your V range is too wide — cap V
+  lower.
+- Trace segments missing (dashed lines disappearing, anti-aliased edges
+  dropping) usually means S or V min is too high — lower it.
+
+---
+See also: signal_reconstruction, practical_tuning
