@@ -22,6 +22,7 @@ from usma.gui.overlay import RegionOverlay
 from usma.gui.config_tool import ConfigToolWindow
 from usma.gui.graph_viewer import GraphViewerFrame
 from usma.theory.wiki_viewer import show_theory_page, make_info_button
+import usma.calibration_export as cal_export
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,46 @@ class MonitorControlGUI:
         self.manual_response_point_entry.configure(state=response_state)
         self.manual_response_dir_entry.configure(state=response_state)
 
+    def _reload_calibration_from_current_config(self):
+        """Rebuild the calibration engine from the currently-loaded config file.
+
+        Called after runtime config switches (Load... / config tool save) so
+        calibration status, diagnostics, and derived thresholds don't go stale.
+        """
+        path = self.config_path.get()
+        new_engine = HybridCalibrationEngine()
+        if path and os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    config_data = json.load(f)
+                cal_data = config_data.get('_calibration')
+                if cal_data and isinstance(cal_data, dict) and cal_data.get('signals'):
+                    new_engine = HybridCalibrationEngine.from_dict(cal_data)
+            except (json.JSONDecodeError, IOError, KeyError) as e:
+                logger.warning(f"[CAL] Could not load calibration data on reload: {e}")
+
+        self.calibration_engine = new_engine
+
+        if hasattr(self, 'graph_viewer') and self.graph_viewer is not None:
+            self.graph_viewer.calibration_engine = self.calibration_engine
+            if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
+                try:
+                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
+                except Exception as e:
+                    logger.debug(f"[CAL] Could not refresh diagnostics on reload: {e}")
+
+        level = self.calibration_engine.confidence_level
+        total = self.calibration_engine.total_signals
+        if hasattr(self, 'cal_status_label_bar'):
+            self._update_calibration_status(level, total)
+
+        if self.calibration_engine.can_estimate:
+            estimates = self.calibration_engine.get_estimates()
+            if estimates:
+                self._apply_calibrated_params(estimates)
+        if hasattr(self, 'param_vars'):
+            self._sync_param_ui_from_config()
+
     def _load_config(self):
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")], initialdir="configs", title="Select Config")
         if not path:
@@ -604,6 +645,7 @@ class MonitorControlGUI:
         self.status_label.config(text=f"Loaded: {os.path.basename(path)}")
         self._update_manual_points_state()
         self._sync_param_ui_from_config()  # Sync parameter UI
+        self._reload_calibration_from_current_config()
 
     def _launch_config_tool(self):
         self.root.iconify()
@@ -626,6 +668,7 @@ class MonitorControlGUI:
                 self.sample_frequency.set(round(1.0 / self.monitor.app_config.screenshot_interval, 2))
             except (ZeroDivisionError, TypeError):
                 pass
+            self._reload_calibration_from_current_config()
 
         self.root.deiconify()
 
@@ -840,7 +883,7 @@ class MonitorControlGUI:
         self._update_calibration_status(level, total)
 
         # Update calibration diagnostic plots
-        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
 
         # If we can estimate, compute and display parameters
         if self.calibration_engine.can_estimate:
@@ -928,6 +971,9 @@ class MonitorControlGUI:
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=2)
             logger.info(f"[CAL] Saved calibration data to {config_path}")
+            # Mirror to calibration_data/ folder so the session is accessible
+            # without opening the config JSON.
+            cal_export.save_all(config_path, self.calibration_engine)
         except Exception as e:
             logger.error(f"[CAL] Failed to save calibration data: {e}")
 
@@ -1031,15 +1077,32 @@ class MonitorControlGUI:
 
     def _clear_calibration(self):
         """Reset calibration engine and revert to default parameters."""
+        n_signals = self.calibration_engine.total_signals if hasattr(self, 'calibration_engine') else 0
         answer = messagebox.askyesno(
             "Clear Calibration Data",
-            "This will delete all calibration signals and revert to default parameters.\n\n"
+            f"This will permanently delete all {n_signals} calibration signal(s) "
+            f"from the engine and revert analysis parameters to defaults.\n\n"
             "The ROI configuration will be kept.\n\n"
-            "Continue?",
+            "Are you sure you want to continue?",
             parent=self.root
         )
         if not answer:
             return
+
+        # Separately ask about the on-disk calibration_data/ folder.
+        config_path = self.config_path.get()
+        folder = cal_export.get_session_folder(config_path) if config_path else None
+        if folder and os.path.isdir(folder):
+            delete_folder = messagebox.askyesno(
+                "Delete Saved Calibration Files?",
+                f"A calibration data folder exists at:\n{folder}\n\n"
+                "This contains CSV data, signal plots, and diagnostics PNG files "
+                "that you may want to keep for analysis or publication.\n\n"
+                "Delete this folder too?",
+                parent=self.root
+            )
+            if delete_folder:
+                cal_export.clear_folder(config_path)
 
         # Reset engine
         self.calibration_engine = HybridCalibrationEngine()
@@ -1051,7 +1114,7 @@ class MonitorControlGUI:
             self.graph_viewer.calibration_engine = self.calibration_engine
             if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
                 try:
-                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
                 except Exception as e:
                     logger.debug(f"[CAL] Could not refresh diagnostics after clear: {e}")
 
@@ -1154,6 +1217,13 @@ class MonitorControlGUI:
                 "Falling back to default values."
             )
 
+        # Persist signals + diagnostic figures to calibration_data/ BEFORE
+        # clearing the engine so the full session is permanently available.
+        folder = cal_export.save_all(self.config_path.get(),
+                                     self.calibration_engine)
+        if folder:
+            logger.info(f"[CAL] Session data saved to {folder}")
+
         # Save calibration data to config file
         self._save_calibration_to_config()
 
@@ -1168,7 +1238,7 @@ class MonitorControlGUI:
             self.graph_viewer.calibration_engine = self.calibration_engine
             if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
                 try:
-                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+                    self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
                 except Exception as e:
                     logger.debug(f"[CAL] Could not refresh diagnostics after finish: {e}")
 
@@ -1426,29 +1496,29 @@ class MonitorControlGUI:
         self._update_calibration_status(level, total)
 
         # Update calibration diagnostic plots
-        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine)
+        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
 
         # Auto-save calibration data periodically
         if total > 0 and total % 3 == 0:
             self._save_calibration_to_config()
 
     def _poll_monitor_queue(self):
-        if not self.monitor or not getattr(self.monitor, 'running', False):
+        if not self.monitor:
             return
-            
+
         try:
             # Process up to 10 events per tick to prevent GUI freeze
             for _ in range(10):
                 event: MonitorEvent = self.monitor.event_queue.get_nowait()
-                
+
                 if event.event_type == "frame_update":
                     frame_res = event.frame_result
                     if frame_res is not None:
-                        self.update_feedback_panel(frame_res)
+                        self._update_feedback_ui(frame_res)
                 elif event.event_type == "hit_detected":
                     lw_data = event.lightweight_data
                     if lw_data is not None:
-                        self._on_plot_data(lw_data, event.run_history or {})
+                        self._update_graph_viewer(lw_data, event.run_history or {})
                 elif event.event_type == "error":
                     err_msg = event.error_message
                     if err_msg is not None:
@@ -1458,11 +1528,19 @@ class MonitorControlGUI:
                     self.is_monitoring.set(False)
                     self.load_button.config(state=tk.NORMAL)
                     self.edit_button.config(state=tk.NORMAL)
+                elif event.event_type == "stopped":
+                    # Loop exited cleanly; keep draining until the queue is empty,
+                    # then let the poll loop terminate naturally.
+                    pass
         except queue.Empty:
             pass
-            
-        # Reschedule
-        if self.monitor and getattr(self.monitor, 'running', False):
+
+        # Keep polling until BOTH the worker thread has stopped AND the queue
+        # has been drained — otherwise final "error"/"stopped" events can be lost.
+        thread = getattr(self.monitor, 'thread', None)
+        thread_alive = thread is not None and thread.is_alive()
+        queue_has_events = not self.monitor.event_queue.empty()
+        if thread_alive or queue_has_events:
             self.root.after(50, self._poll_monitor_queue)
 
     def _toggle_monitoring(self):

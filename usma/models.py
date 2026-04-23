@@ -12,7 +12,7 @@ from scipy.signal import butter, filtfilt
 logger = logging.getLogger(__name__)
 
 # --- Version Configuration ---
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.12.2"
 
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
 @dataclass
@@ -835,13 +835,28 @@ class HybridCalibrationEngine:
             }
         return result
 
-    def get_threshold_history(self) -> dict:
-        """Return threshold estimates at each signal count for convergence plotting."""
+    def get_threshold_history(self, include_ci: bool = False) -> dict:
+        """Return threshold estimates at each signal count for convergence plotting.
+
+        When ``include_ci`` is True, also returns per-step 95 % Bayesian credible
+        interval bands for each primary parameter under keys ``<param>_ci_low``
+        and ``<param>_ci_high``. These are aligned with ``count`` and can be used
+        to draw confidence bands around the convergence lines.
+        """
         history = {'count': [], 'fft_energy_ratio': [], 'exceedance_ratio': [], 'relative_residual_ratio': []}
+        if include_ci:
+            for k in ('fft_energy_ratio', 'exceedance_ratio', 'relative_residual_ratio'):
+                history[f'{k}_ci_low'] = []
+                history[f'{k}_ci_high'] = []
         if len(self._all_signals) < 6:
             return history
         # Replay signals through a temporary engine to get estimates at each step
         temp = HybridCalibrationEngine()
+        ci_keymap = {
+            'fft_energy_ratio': 'fft_energy_ratio_threshold',
+            'exceedance_ratio': 'exceedance_ratio_threshold',
+            'relative_residual_ratio': 'relative_residual_ratio',
+        }
         for sig in self._all_signals:
             judgment = sig.get('judgment', 'IGNORE')
             sig_copy = dict(sig)
@@ -856,7 +871,35 @@ class HybridCalibrationEngine:
                     history['fft_energy_ratio'].append(est.get('fft_energy_ratio_threshold'))
                     history['exceedance_ratio'].append(est.get('exceedance_ratio_threshold'))
                     history['relative_residual_ratio'].append(est.get('relative_residual_ratio'))
+                    if include_ci:
+                        ci = temp.get_bayesian_ci() if temp.bayesian.can_estimate else None
+                        for hkey, bayes_key in ci_keymap.items():
+                            if ci and bayes_key in ci:
+                                history[f'{hkey}_ci_low'].append(ci[bayes_key]['ci_low'])
+                                history[f'{hkey}_ci_high'].append(ci[bayes_key]['ci_high'])
+                            else:
+                                history[f'{hkey}_ci_low'].append(None)
+                                history[f'{hkey}_ci_high'].append(None)
         return history
+
+    def get_signal_table_data(self) -> List[dict]:
+        """Return per-signal summary rows for the Cal. Diagnostics table.
+
+        Each row contains the minimal fields needed to render the table and to
+        cross-reference a signal back into ``_all_signals`` (via ``index``).
+        """
+        rows = []
+        for i, sig in enumerate(self._all_signals):
+            rows.append({
+                'index': i,
+                'hit_key': sig.get('roi_name', f'signal_{i}'),
+                'signal_type': sig.get('signal_type', 'unknown'),
+                'judgment': sig.get('judgment', '?'),
+                'energy_ratio': float(sig.get('energy_ratio', 0.0) or 0.0),
+                'exceedance_ratio': float(sig.get('exceedance_ratio', 0.0) or 0.0),
+                'max_abs_residual': float(sig.get('max_abs_residual', 0.0) or 0.0),
+            })
+        return rows
 
     def get_bayesian_ci(self) -> Optional[dict]:
         """Return Bayesian posterior grids and credible intervals for plotting."""

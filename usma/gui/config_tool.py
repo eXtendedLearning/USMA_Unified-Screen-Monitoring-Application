@@ -487,6 +487,8 @@ class ConfigToolWindow(tk.Toplevel):
         self.param_vars['lowpass_filter_order'].set(self.app_config.lowpass_filter_order)
         self.param_vars['relative_residual_ratio'].set(self.app_config.relative_residual_ratio)
         self.param_vars['exceedance_ratio_threshold'].set(self.app_config.exceedance_ratio_threshold)
+        if hasattr(self, 'monitor_index_var'):
+            self.monitor_index_var.set(self.app_config.monitor_index)
         self._redraw_regions_on_canvas()
         self._update_hsv_button_state()  # Update HSV button state
 
@@ -610,6 +612,11 @@ class ConfigToolWindow(tk.Toplevel):
             return
         try:
             self.app_config = load_app_config(path)
+            self.current_config_path = path
+            # Mirror the loaded config's monitor selection into the control so
+            # subsequent screenshots don't keep using the previous monitor.
+            if hasattr(self, 'monitor_index_var'):
+                self.monitor_index_var.set(self.app_config.monitor_index)
             self._update_ui_from_data()
             if self.screenshot:
                 self._redraw_regions_on_canvas()

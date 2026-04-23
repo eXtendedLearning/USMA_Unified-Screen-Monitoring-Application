@@ -55,7 +55,9 @@ class ScreenMonitor:
         self.app_config = self._load_config(self.config_path)
         self.signal_analyzer = SignalAnalyzer(self.app_config)
         self.coherence_analyzer = CoherenceAnalyzer(self.app_config, self.signal_analyzer)
-        # Callbacks are deprecated, use event_queue instead
+        # Legacy callbacks are retained for API compatibility but are no longer
+        # invoked from the worker thread. The event_queue is the single bridge
+        # to the Tk GUI, drained via MonitorControlGUI._poll_monitor_queue.
         self.update_callback = update_callback
         self.plot_callback = plot_callback
         self.event_queue = queue.Queue(maxsize=100)
@@ -69,6 +71,9 @@ class ScreenMonitor:
         self.verbose_log_options = VerboseLogOptions()
         self.last_logged_ratio: Optional[float] = None
         self.last_logged_energy: Optional[float] = None
+        self.last_logged_psd_ratio: Optional[float] = None
+        self.last_logged_psd_energy: Optional[float] = None
+        self.last_logged_coh_badness: Optional[float] = None
         self.audio = AudioFeedback()
         self.audio_feedback_enabled = False
         self.audio_stream = None
@@ -154,6 +159,9 @@ class ScreenMonitor:
         self.frame_count = 0
         self.last_logged_ratio = None
         self.last_logged_energy = None
+        self.last_logged_psd_ratio = None
+        self.last_logged_psd_energy = None
+        self.last_logged_coh_badness = None
         self.hit_counters.clear()
         self.run_history.clear()
         self.running = True
@@ -177,6 +185,34 @@ class ScreenMonitor:
     def update_config(self, new_config_path):
         self.config_path = new_config_path
         self.app_config = self._load_config(new_config_path)
+
+        # Rebind collaborators so analysis/image logging pick up the new config
+        self.signal_analyzer.app_config = self.app_config
+        self.coherence_analyzer.app_config = self.app_config
+        self.image_logger.app_config = self.app_config
+
+        # Clear per-run state so stale caches/counters don't leak into the new config
+        self._ocr_cache.clear()
+        self._ocr_roi_hash.clear()
+        self.hit_counters.clear()
+        self.run_history.clear()
+        self.coherence_tracking.clear()
+        self.last_logged_ratio = None
+        self.last_logged_energy = None
+        self.last_logged_psd_ratio = None
+        self.last_logged_psd_energy = None
+        self.last_logged_coh_badness = None
+        self.last_known_status = "Unknown"
+        self.last_known_overload = "Unknown"
+        self.current_run = "Run 1"
+
+        # Drain any stale events queued against the previous config
+        try:
+            while True:
+                self.event_queue.get_nowait()
+        except queue.Empty:
+            pass
+
         logger.info(f"Configuration updated to {new_config_path}")
 
 
@@ -214,9 +250,6 @@ class ScreenMonitor:
                 except queue.Full:
                     pass
 
-                if self.update_callback:
-                    self.update_callback(frame_result)
-
                 if self.audio_feedback_enabled:
                     with self.audio_lock:
                         is_hf = frame_result.overall_is_hf if frame_result.overall_is_hf is not None else False
@@ -252,7 +285,6 @@ class ScreenMonitor:
                     )
                     self.running = False
                     self.audio.stop()
-                    # Notify GUI if callback is available
                     try:
                         self.event_queue.put_nowait(MonitorEvent(
                             event_type="error",
@@ -260,16 +292,17 @@ class ScreenMonitor:
                         ))
                     except queue.Full:
                         pass
-                    if self.update_callback:
-                        try:
-                            error_result = FrameAnalysisResult()
-                            error_result.status_text = f"ERROR: Stopped after {self._consecutive_errors} failures"
-                            self.update_callback(error_result)
-                        except Exception:
-                            pass  # GUI may already be dead
-                    return
+                    break
 
                 time.sleep(backoff)
+
+        # Always emit a terminal "stopped" event so the GUI poll loop can
+        # finish cleanly, regardless of whether the loop ended via stop()
+        # or via the consecutive-error guard above.
+        try:
+            self.event_queue.put_nowait(MonitorEvent(event_type="stopped"))
+        except queue.Full:
+            pass
 
     def _process_frame(self, image: np.ndarray) -> Tuple[FrameAnalysisResult, Dict[str, np.ndarray]]:
         self.frame_count += 1
@@ -406,13 +439,28 @@ class ScreenMonitor:
         return frame_result, all_rois
 
     def _handle_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
-        if not frame_result.frf_results:
+        if not (frame_result.frf_results or frame_result.psd_results or frame_result.coherence_results):
             return
 
-        has_changed = (frame_result.avg_energy_ratio is not None and 
-                       (self.last_logged_ratio is None or 
+        frf_changed = (frame_result.avg_energy_ratio is not None and
+                       (self.last_logged_ratio is None or
                         not np.isclose(frame_result.avg_energy_ratio, self.last_logged_ratio, atol=1e-5) or
                         not np.isclose(frame_result.avg_high_freq_energy, self.last_logged_energy, atol=1e-5)))
+
+        psd_changed = (frame_result.psd_avg_energy_ratio is not None and
+                       (self.last_logged_psd_ratio is None or
+                        not np.isclose(frame_result.psd_avg_energy_ratio, self.last_logged_psd_ratio, atol=1e-5)))
+
+        coh_avg_badness = None
+        if frame_result.coherence_results:
+            coh_avg_badness = float(np.mean(
+                [c.normalized_badness for c in frame_result.coherence_results.values()]
+            ))
+        coh_changed = (coh_avg_badness is not None and
+                       (self.last_logged_coh_badness is None or
+                        not np.isclose(coh_avg_badness, self.last_logged_coh_badness, atol=1e-5)))
+
+        has_changed = frf_changed or psd_changed or coh_changed
 
         if has_changed:
             points = frame_result.points_info
@@ -493,9 +541,15 @@ class ScreenMonitor:
                 logger.info(f"  CLASSIFICATION: {classification}")
                 logger.info(f"----------------------------")
             
-            self.last_logged_ratio = frame_result.avg_energy_ratio
-            self.last_logged_energy = frame_result.avg_high_freq_energy
-            
+            if frame_result.avg_energy_ratio is not None:
+                self.last_logged_ratio = frame_result.avg_energy_ratio
+                self.last_logged_energy = frame_result.avg_high_freq_energy
+            if frame_result.psd_avg_energy_ratio is not None:
+                self.last_logged_psd_ratio = frame_result.psd_avg_energy_ratio
+                self.last_logged_psd_energy = frame_result.psd_avg_energy_ratio
+            if coh_avg_badness is not None:
+                self.last_logged_coh_badness = coh_avg_badness
+
             counter_key = f"{points.hammer_point}{points.response_point}"
             current_hit = self.hit_counters.get(counter_key, 0) + 1
             self.hit_counters[counter_key] = current_hit
@@ -520,44 +574,40 @@ class ScreenMonitor:
                 if self.image_logging_enabled:
                     self.image_logger.current_run = self.current_run
                     self.image_logger.run_history = self.run_history
-                    self.image_logger.log_hit(frf_result, frame_result, frf_name, base_filename, all_rois)
+                    self.image_logger.log_hit(frf_result, frame_result, frf_name, base_filename, all_rois, signal_type='frf')
                 if self.data_log_options.log_unv:
                     self.unv_exporter.export(frf_result, frame_result, frf_name, base_filename)
 
-                if self.plot_callback:
-                    # Create lightweight copy for plot callback
-                    lightweight_data = LightweightHitData(
-                        signal_physical=np.copy(frf_result.signal_physical) if frf_result.signal_physical is not None else np.array([]),
-                        filtered_physical=np.copy(frf_result.filtered_physical) if frf_result.filtered_physical is not None else None,
-                        residual_physical=np.copy(frf_result.residual_physical) if frf_result.residual_physical is not None else None,
-                        fft_freqs=np.copy(frf_result.fft_freqs),
-                        fft_mags=np.copy(frf_result.fft_mags),
-                        energy_ratio=frf_result.energy_ratio,
-                        is_high_frequency=frf_result.is_high_frequency,
-                        exceedance_count=frf_result.exceedance_count,
-                        exceedance_ratio=frf_result.exceedance_ratio,
-                        lowpass_is_bad_hit=frf_result.lowpass_is_bad_hit,
-                        total_energy=frf_result.total_energy,
-                        high_freq_energy=frf_result.high_freq_energy,
-                        y_axis_unit=region.y_axis_unit,
-                        x_axis_min=region.x_axis_min,
-                        x_axis_max=region.x_axis_max,
-                        hit_key=hit_key,
-                        run=points.run,
-                        signal_type="frf",
-                        max_abs_residual=frf_result.max_abs_residual,
-                        dynamic_threshold=frf_result.dynamic_threshold,
-                    )
-                    if self.plot_callback:
-                        self.plot_callback(lightweight_data, self.run_history.copy())
-                    try:
-                        self.event_queue.put_nowait(MonitorEvent(
-                            event_type="hit_detected",
-                            lightweight_data=lightweight_data,
-                            run_history=self.run_history.copy()
-                        ))
-                    except queue.Full:
-                        pass
+                lightweight_data = LightweightHitData(
+                    signal_physical=np.copy(frf_result.signal_physical) if frf_result.signal_physical is not None else np.array([]),
+                    filtered_physical=np.copy(frf_result.filtered_physical) if frf_result.filtered_physical is not None else None,
+                    residual_physical=np.copy(frf_result.residual_physical) if frf_result.residual_physical is not None else None,
+                    fft_freqs=np.copy(frf_result.fft_freqs),
+                    fft_mags=np.copy(frf_result.fft_mags),
+                    energy_ratio=frf_result.energy_ratio,
+                    is_high_frequency=frf_result.is_high_frequency,
+                    exceedance_count=frf_result.exceedance_count,
+                    exceedance_ratio=frf_result.exceedance_ratio,
+                    lowpass_is_bad_hit=frf_result.lowpass_is_bad_hit,
+                    total_energy=frf_result.total_energy,
+                    high_freq_energy=frf_result.high_freq_energy,
+                    y_axis_unit=region.y_axis_unit,
+                    x_axis_min=region.x_axis_min,
+                    x_axis_max=region.x_axis_max,
+                    hit_key=hit_key,
+                    run=points.run,
+                    signal_type="frf",
+                    max_abs_residual=frf_result.max_abs_residual,
+                    dynamic_threshold=frf_result.dynamic_threshold,
+                )
+                try:
+                    self.event_queue.put_nowait(MonitorEvent(
+                        event_type="hit_detected",
+                        lightweight_data=lightweight_data,
+                        run_history=self.run_history.copy()
+                    ))
+                except queue.Full:
+                    pass
 
             # --- PSD results: fire separate plot_callback with psd_ prefix ---
             for psd_name, psd_result in frame_result.psd_results.items():
@@ -577,41 +627,38 @@ class ScreenMonitor:
                 if self.image_logging_enabled:
                     self.image_logger.current_run = self.current_run
                     self.image_logger.run_history = self.run_history
-                    self.image_logger.log_hit(psd_result, frame_result, psd_name, psd_base, all_rois)
+                    self.image_logger.log_hit(psd_result, frame_result, psd_name, psd_base, all_rois, signal_type='psd')
 
-                if self.plot_callback:
-                    psd_lightweight = LightweightHitData(
-                        signal_physical=np.copy(psd_result.signal_physical) if psd_result.signal_physical is not None else np.array([]),
-                        filtered_physical=np.copy(psd_result.filtered_physical) if psd_result.filtered_physical is not None else None,
-                        residual_physical=np.copy(psd_result.residual_physical) if psd_result.residual_physical is not None else None,
-                        fft_freqs=np.copy(psd_result.fft_freqs),
-                        fft_mags=np.copy(psd_result.fft_mags),
-                        energy_ratio=psd_result.energy_ratio,
-                        is_high_frequency=psd_result.is_high_frequency,
-                        exceedance_count=psd_result.exceedance_count,
-                        exceedance_ratio=psd_result.exceedance_ratio,
-                        lowpass_is_bad_hit=psd_result.lowpass_is_bad_hit,
-                        total_energy=psd_result.total_energy,
-                        high_freq_energy=psd_result.high_freq_energy,
-                        y_axis_unit=region.y_axis_unit,
-                        x_axis_min=region.x_axis_min,
-                        x_axis_max=region.x_axis_max,
-                        hit_key=hit_key_psd,
-                        run=points.run,
-                        signal_type="psd",
-                        max_abs_residual=psd_result.max_abs_residual,
-                        dynamic_threshold=psd_result.dynamic_threshold,
-                    )
-                    if self.plot_callback:
-                        self.plot_callback(psd_lightweight, self.run_history.copy())
-                    try:
-                        self.event_queue.put_nowait(MonitorEvent(
-                            event_type="hit_detected",
-                            lightweight_data=psd_lightweight,
-                            run_history=self.run_history.copy()
-                        ))
-                    except queue.Full:
-                        pass
+                psd_lightweight = LightweightHitData(
+                    signal_physical=np.copy(psd_result.signal_physical) if psd_result.signal_physical is not None else np.array([]),
+                    filtered_physical=np.copy(psd_result.filtered_physical) if psd_result.filtered_physical is not None else None,
+                    residual_physical=np.copy(psd_result.residual_physical) if psd_result.residual_physical is not None else None,
+                    fft_freqs=np.copy(psd_result.fft_freqs),
+                    fft_mags=np.copy(psd_result.fft_mags),
+                    energy_ratio=psd_result.energy_ratio,
+                    is_high_frequency=psd_result.is_high_frequency,
+                    exceedance_count=psd_result.exceedance_count,
+                    exceedance_ratio=psd_result.exceedance_ratio,
+                    lowpass_is_bad_hit=psd_result.lowpass_is_bad_hit,
+                    total_energy=psd_result.total_energy,
+                    high_freq_energy=psd_result.high_freq_energy,
+                    y_axis_unit=region.y_axis_unit,
+                    x_axis_min=region.x_axis_min,
+                    x_axis_max=region.x_axis_max,
+                    hit_key=hit_key_psd,
+                    run=points.run,
+                    signal_type="psd",
+                    max_abs_residual=psd_result.max_abs_residual,
+                    dynamic_threshold=psd_result.dynamic_threshold,
+                )
+                try:
+                    self.event_queue.put_nowait(MonitorEvent(
+                        event_type="hit_detected",
+                        lightweight_data=psd_lightweight,
+                        run_history=self.run_history.copy()
+                    ))
+                except queue.Full:
+                    pass
 
             # --- Coherence results: fire plot_callback with coherence signal ---
             for coh_name, coh_result in frame_result.coherence_results.items():
@@ -620,37 +667,34 @@ class ScreenMonitor:
                     continue
                 hit_key_coh = f"coh_{counter_key}_{current_hit}"
 
-                if self.plot_callback:
-                    coh_lightweight = LightweightHitData(
-                        signal_physical=np.copy(coh_result.signal_physical),
-                        filtered_physical=None,
-                        residual_physical=np.copy(coh_result.inverted_signal),
-                        fft_freqs=np.copy(coh_result.freq_axis) if coh_result.freq_axis is not None else np.array([]),
-                        fft_mags=np.array([]),
-                        energy_ratio=coh_result.normalized_badness,
-                        is_high_frequency=False,
-                        exceedance_count=0,
-                        exceedance_ratio=0.0,
-                        lowpass_is_bad_hit=False,
-                        total_energy=coh_result.mean_coherence,
-                        high_freq_energy=coh_result.min_coherence,
-                        y_axis_unit="Coherence",
-                        x_axis_min=region.x_axis_min,
-                        x_axis_max=region.x_axis_max,
-                        hit_key=hit_key_coh,
-                        run=points.run,
-                        signal_type="coherence"
-                    )
-                    if self.plot_callback:
-                        self.plot_callback(coh_lightweight, self.run_history.copy())
-                    try:
-                        self.event_queue.put_nowait(MonitorEvent(
-                            event_type="hit_detected",
-                            lightweight_data=coh_lightweight,
-                            run_history=self.run_history.copy()
-                        ))
-                    except queue.Full:
-                        pass
+                coh_lightweight = LightweightHitData(
+                    signal_physical=np.copy(coh_result.signal_physical),
+                    filtered_physical=None,
+                    residual_physical=np.copy(coh_result.inverted_signal),
+                    fft_freqs=np.copy(coh_result.freq_axis) if coh_result.freq_axis is not None else np.array([]),
+                    fft_mags=np.array([]),
+                    energy_ratio=coh_result.normalized_badness,
+                    is_high_frequency=False,
+                    exceedance_count=0,
+                    exceedance_ratio=0.0,
+                    lowpass_is_bad_hit=False,
+                    total_energy=coh_result.mean_coherence,
+                    high_freq_energy=coh_result.min_coherence,
+                    y_axis_unit="Coherence",
+                    x_axis_min=region.x_axis_min,
+                    x_axis_max=region.x_axis_max,
+                    hit_key=hit_key_coh,
+                    run=points.run,
+                    signal_type="coherence"
+                )
+                try:
+                    self.event_queue.put_nowait(MonitorEvent(
+                        event_type="hit_detected",
+                        lightweight_data=coh_lightweight,
+                        run_history=self.run_history.copy()
+                    ))
+                except queue.Full:
+                    pass
 
     def _handle_continuous_logging(self, frame_result: FrameAnalysisResult, all_rois: Dict[str, np.ndarray]):
         """

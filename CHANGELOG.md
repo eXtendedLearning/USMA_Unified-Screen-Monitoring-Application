@@ -4,7 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## v0.12.0 — Calibration Cleanup, Diagnostic Labels & Theory Wiki *(current)*
+## v0.12.2 — Config Hot-Swap, Queue-Only GUI Bridge & Export Fixes *(current)*
+
+Follow-up based on an external Codex review of the launcher → monitor → analysis → export → GUI pipeline (see `TASKS.md`). All P0/P1/P2 code issues flagged in that review are addressed here; the optional test-suite task is deferred.
+
+- **Config hot-swap now fully rebinds runtime state** — `ScreenMonitor.update_config()` previously only replaced `self.app_config`, leaving `SignalAnalyzer`, `CoherenceAnalyzer`, and `ImageLogger` pointing at the old object. It now also:
+  - re-assigns `app_config` on all three collaborators so analysis thresholds, HSV values, monitor selection and image-log annotations are all picked up;
+  - clears `_ocr_cache`, `_ocr_roi_hash`, `hit_counters`, `run_history`, `coherence_tracking`, `last_logged_*` and `last_known_*` so stale per-run state doesn't leak across configs;
+  - drains the `event_queue` of any frames queued against the previous config.
+- **Queue-only Tk bridge** — the monitor previously drove the GUI through BOTH a thread-safe `event_queue` AND direct `update_callback` / `plot_callback` invocations from the worker thread. The direct callbacks are removed from `_monitoring_loop()` and `_handle_logging()`; `MonitorEvent`s are now the single handoff. `ScreenMonitor._monitoring_loop()` also emits a terminal `"stopped"` event when it exits (either via `stop()` or the consecutive-error guard).
+- **Poll loop no longer drops final events** — `MonitorControlGUI._poll_monitor_queue()` used to terminate as soon as `monitor.running` flipped to `False`, which could discard queued `"error"` messages. It now keeps rescheduling until BOTH the worker thread has finished AND the queue is empty, and handles the new `"stopped"` event.
+- **PSD-only and coherence-only sessions now emit hits** — `_handle_logging()` previously returned immediately when `frame_result.frf_results` was empty, making the downstream PSD/coherence code unreachable. The entry guard now checks FRF ∪ PSD ∪ coherence, and hit-change detection is computed per signal family (`last_logged_ratio` for FRF, new `last_logged_psd_ratio` for PSD, new `last_logged_coh_badness` for coherence).
+- **UNV exporter preserves signed DOFs** — `parse_dof()` used to collapse `+X/-X`, `+Y/-Y`, `+Z/-Z` into unsigned 1/2/3, and identifier line 5 always wrote `+{dir}`. It now returns signed DOFs (`±1`, `±2`, `±3`) and writes the actual sign in both the DOF record and the `FRF\\{point}:±{axis}` identifier — modal-analysis datasets no longer alias opposing excitation/response orientations.
+- **Calibration state reloaded on config switch** — new `MonitorControlGUI._reload_calibration_from_current_config()` helper rebuilds `HybridCalibrationEngine` from the loaded config's `_calibration` block, syncs `graph_viewer.calibration_engine`, refreshes the status bar and diagnostic plots, and re-applies calibrated params. Called from both `_load_config()` (Load… dialog) and `_launch_config_tool()` (post-save).
+- **ConfigToolWindow state desync on load fixed** — `_load_config()` now updates `current_config_path` (so "Save As" defaults correctly) and mirrors `monitor_index_var` from the loaded config (so subsequent screenshots capture the right monitor). `_update_ui_from_data()` also re-syncs `monitor_index_var` so programmatic config loads stay consistent.
+- **PSD image logs use PSD thresholds** — `ImageLogger._create_fft_plot_safe()` and `_create_lowpass_comparison_plot_safe()` were annotating every plot with `app_config.fft_cutoff_frequency` / `lowpass_cutoff` (FRF values), even for PSD hits. `log_hit()` now accepts a `signal_type` hint (defaulting to inference from `region.roi_type`) and passes the resolved `AnalysisParams` into the plot helpers, so saved PSD plots show the actual PSD cutoff/order used at runtime.
+
+## v0.12.1 — Calibration Diagnostics Rework, Theory Additions & Bugfixes
+
+- **Dedicated Calibration Diagnostics window** — `Cal. Diagnostics` is no longer a spurious entry in the Signal-source dropdown. It now opens in its own non-modal `tk.Toplevel` (`usma/gui/cal_diagnostics.py`) via a new **"Cal. Diagnostics"** button on the Graph Viewer nav bar:
+  - `SIGNAL_SOURCES` cleaned up to `['All', 'FRF', 'PSD', 'Coherence']`; the old `_plot_calibration_diagnostics` method, `cal_info_frame` row, and related early-return guards removed from `GraphViewerFrame`.
+  - Button is greyed out until the engine has ≥ 6 stored signals; `update_calibration_diagnostics()` now manages that state and forwards live updates to the open window.
+  - Singleton behaviour — re-clicking the button raises the existing window via `deiconify()` + `lift()` rather than duplicating it.
+  - Window layout: header (Good/Bad/Total/Confidence summary + ⓘ help + Refresh), `ttk.PanedWindow` with a left signal table + per-signal detail panel and a right 12×8 matplotlib figure, toolbar with **Export PNG** and **Close**.
+  - **Signal table** — sortable `ttk.Treeview` (click column headers to toggle asc/desc) listing every calibration signal with columns `#, Hit Key, Type, Judgment, Energy Ratio, Exc. Ratio, Max Residual`; rows colour-coded green (GOOD) / red (BAD). A filter combobox (`All / FRF only / PSD only`) filters both the table and which signals contribute to the histograms.
+  - **Per-signal detail panel** — selecting a row draws that signal's `signal_physical` as a line plot and shows `"Energy Ratio … | Exc. Ratio … | Max |Residual| … | Dynamic Thr …"` underneath, so the user can eyeball whether each Good/Bad call was correctly labelled.
+  - **Diagnostic plots** — FRF vs. PSD distinguished via `hatch='//'` on PSD histograms; selecting a table row overlays that signal's metric value as a dashed gold vertical line across the corresponding distribution subplot; ROC dots gain a `"thr = <value>"` annotation in the parameter's native units; convergence subplot adds translucent 95 % credible-interval bands from a new `get_threshold_history(include_ci=True)` extension.
+  - `HybridCalibrationEngine` gains `get_signal_table_data()` (minimal rows for the table) and an extended `get_threshold_history(include_ci: bool = False)` (replays Bayesian CI at each step).
+- **Signal-plot hit-navigation bugfix** — `_plot_all_signals_stacked()` now respects `self.current_hit_index` instead of always using the latest hit of each type; the currently selected hit keeps its slot in the stack (highlighted with a gold ★ title and thicker line), while the other signal types show their most recent entry for context. `_update_plot()` also snaps `current_hit_index` onto a filter-matching hit when it drifts out of range.
+- **THEORY.md — three new reading guides in §7.2** (calibration diagnostic plots):
+  - §7.2.1 explains what `density=True` means on the distribution Y-axis — how `bar_height` is computed, why density is preferred over raw counts when GOOD/BAD sample sizes differ, and what the relative position of the two humps actually tells you.
+  - A dedicated subsection explains the 95 % **credible interval** band, including the Bayesian-vs-frequentist distinction and how to read "wide band", "narrow band" and "white line outside the band" cases. §5.3 gets a matching interpretation paragraph on the Bayesian estimator itself.
+  - §7.2.2 is a full ROC-reading guide — axes, diagonal, AUC rule-of-thumb, the Youden dot, the three per-metric curves, and what to do when all AUCs are below 0.75.
+- **THEORY.md — Practical Tuning Guide reformatted** — the narrow-viewer-hostile markdown table replaced with a vertical definition-list: one short paragraph per goal (FFT too sensitive / not sensitive enough, LP not firing / firing on clean hits, LP Order). Renders cleanly in the in-app Theory Wiki viewer.
+
+## v0.12.0 — Calibration Cleanup, Diagnostic Labels & Theory Wiki
 
 - **Calibration signal pool now purged correctly** — the "Similar Signal Detected" popup no longer fires against stale session data:
   - New `HybridCalibrationEngine.clear_signals()` method empties `_all_signals` and resets `good_count` / `bad_count` while preserving the fitted estimator state (thresholds stay applied)

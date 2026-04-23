@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 
 from usma.models import LightweightHitData, AppConfig, HybridCalibrationEngine
 from usma.utils import TextHandler
-from usma.theory.wiki_viewer import show_theory_page
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ class GraphViewerFrame(ttk.LabelFrame):
     """Embedded matplotlib graph viewer with hit navigation and console output."""
     
     PLOT_TYPES = ['Signal', 'FFT', 'Lowpass Comparison', 'Residual Analysis', 'Run Summary']
-    SIGNAL_SOURCES = ['All', 'FRF', 'PSD', 'Coherence', 'Cal. Diagnostics']
+    SIGNAL_SOURCES = ['All', 'FRF', 'PSD', 'Coherence']
     MAX_HISTORY = 25  # Reduced from 50 to limit memory usage
 
     def __init__(self, parent):
@@ -85,25 +84,18 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.next_source_btn = ttk.Button(source_frame, text=">", command=self._next_signal_source, width=3)
         self.next_source_btn.pack(side=tk.LEFT, padx=2)
 
+        # Dedicated Cal. Diagnostics window launcher. Disabled until the
+        # calibration engine has accumulated at least 6 signals.
+        self.cal_diag_btn = ttk.Button(nav_frame, text="Cal. Diagnostics",
+                                       command=self._open_cal_diagnostics,
+                                       state=tk.DISABLED)
+        self.cal_diag_btn.pack(side=tk.RIGHT, padx=5)
+
         self.hit_info_label = ttk.Label(nav_frame, text="No data", font=("Segoe UI", 9))
         self.hit_info_label.pack(side=tk.RIGHT, padx=10)
 
-        # Calibration-diagnostics info row — shown only when the "Cal.
-        # Diagnostics" signal source is selected. Constructed here but not
-        # packed until needed; pack_forget()'d when hidden.
-        self.cal_info_frame = ttk.Frame(self)
-        ttk.Label(self.cal_info_frame,
-                  text="Understanding these plots:",
-                  font=("Segoe UI", 8)).pack(side=tk.LEFT)
-        _cal_info_lbl = tk.Label(self.cal_info_frame, text="\u24D8",
-                                 font=("Segoe UI", 10), fg="#5DADE2",
-                                 cursor="hand2")
-        _cal_info_lbl.bind(
-            "<Button-1>",
-            lambda e: show_theory_page(self.winfo_toplevel(),
-                                       "calibration_engine"),
-        )
-        _cal_info_lbl.pack(side=tk.LEFT, padx=2)
+        # Singleton handle for the Cal. Diagnostics Toplevel window.
+        self._cal_diag_window = None
 
         # Graph area (takes all remaining space)
         self.figure = Figure(figsize=(6, 4), dpi=100, facecolor='#1E1E1E')
@@ -208,8 +200,6 @@ class GraphViewerFrame(ttk.LabelFrame):
     def _matches_filter(self, hit_data: LightweightHitData) -> bool:
         if self.signal_filter == "All":
             return True
-        if self.signal_filter == "Cal. Diagnostics":
-            return False  # Diagnostics view doesn't use hit history
         filter_map = {"FRF": "frf", "PSD": "psd", "Coherence": "coherence"}
         return hit_data.signal_type == filter_map.get(self.signal_filter, "")
 
@@ -264,172 +254,65 @@ class GraphViewerFrame(ttk.LabelFrame):
         self._update_plot()
         self._update_navigation_state()
         
-    def update_calibration_diagnostics(self, engine: HybridCalibrationEngine):
-        """Update calibration engine reference and refresh diagnostic plots if active."""
+    def update_calibration_diagnostics(self, engine: HybridCalibrationEngine,
+                                       config_path: str = ""):
+        """Update engine reference, toggle the Cal. Diagnostics button state,
+        and forward the update to the open diagnostics window if any.
+        """
         self.calibration_engine = engine
-        if self.signal_filter == "Cal. Diagnostics":
-            self._plot_calibration_diagnostics()
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
-
-    def _plot_calibration_diagnostics(self):
-        """Render calibration diagnostic subplots: distributions, ROC, convergence."""
-        if self.calibration_engine is None:
-            self.figure.clear()
-            ax = self.figure.add_subplot(111)
-            ax.set_facecolor('#2E2E2E')
-            ax.text(0.5, 0.5, 'No calibration data', transform=ax.transAxes,
-                    ha='center', va='center', color='white', fontsize=12)
-            return
-
-        engine = self.calibration_engine
-        dist_data = engine.get_distribution_data()
-        roc_data = engine.get_roc_data()
-        bayesian_ci = engine.get_bayesian_ci()
-
-        # Determine layout: 2x2 if ROC available, else 1x3 distributions + convergence
-        has_roc = roc_data is not None and len(roc_data) > 0
-        has_convergence = engine.total_signals >= 6
-
-        if has_roc:
-            # 2x2: 3 distribution plots + 1 ROC combined
-            self.figure.clear()
-            axes = self.figure.subplots(2, 2)
-            ax_dist = [axes[0, 0], axes[0, 1], axes[1, 0]]
-            ax_extra = axes[1, 1]
-        elif has_convergence:
-            self.figure.clear()
-            axes = self.figure.subplots(2, 2)
-            ax_dist = [axes[0, 0], axes[0, 1], axes[1, 0]]
-            ax_extra = axes[1, 1]
-        else:
-            self.figure.clear()
-            ax_dist = self.figure.subplots(1, 3)
-            ax_extra = None
-
-        # Get current threshold estimates
-        estimates = engine.get_estimates() if engine.can_estimate else {}
-
-        # --- Feature Distribution Plots ---
-        param_labels = [
-            ('fft_energy_ratio', 'FFT Energy Ratio', 'fft_energy_ratio_threshold'),
-            ('exceedance_ratio', 'Exceedance Ratio', 'exceedance_ratio_threshold'),
-            ('relative_residual_ratio', 'Relative Residual Ratio', 'relative_residual_ratio'),
-        ]
-
-        for idx, (key, title, est_key) in enumerate(param_labels):
-            ax = ax_dist[idx]
-            ax.set_facecolor('#2E2E2E')
-            ax.tick_params(axis='both', colors='white', labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_color('white')
-
-            good_vals = dist_data[key]['good']
-            bad_vals = dist_data[key]['bad']
-
-            if good_vals:
-                ax.hist(good_vals, bins=max(5, len(good_vals)//2), alpha=0.6,
-                        color='#2ECC71', label=f'Good ({len(good_vals)})', density=True)
-            if bad_vals:
-                ax.hist(bad_vals, bins=max(5, len(bad_vals)//2), alpha=0.6,
-                        color='#E74C3C', label=f'Bad ({len(bad_vals)})', density=True)
-
-            # Threshold lines from estimators
-            if estimates and est_key in estimates:
-                ax.axvline(estimates[est_key], color='white', linewidth=1.5,
-                           linestyle='-', label='Merged', alpha=0.9)
-
-            # Bayesian credible interval shading
-            if bayesian_ci and est_key in bayesian_ci:
-                ci = bayesian_ci[est_key]
-                ax.axvspan(ci['ci_low'], ci['ci_high'], alpha=0.15, color='#3498DB',
-                           label='95% CI')
-
-            ax.set_title(title, color='white', fontsize=8)
-            ax.set_xlabel(title, color='white', fontsize=7)
-            ax.set_ylabel('Density', color='white', fontsize=7)
-            ax.legend(fontsize=6, facecolor='#2E2E2E', labelcolor='white', loc='upper right')
-            ax.grid(True, linestyle='--', alpha=0.2)
-
-        # --- Extra plot: ROC or Convergence ---
-        if ax_extra is not None:
-            ax_extra.set_facecolor('#2E2E2E')
-            ax_extra.tick_params(axis='both', colors='white', labelsize=7)
-            for spine in ax_extra.spines.values():
-                spine.set_color('white')
-
-            if has_roc:
-                # Combined ROC curves
-                colors = {'fft_energy_ratio': '#E74C3C', 'exceedance_ratio': '#F39C12',
-                          'relative_residual_ratio': '#3498DB'}
-                for param_key, roc_info in roc_data.items():
-                    ax_extra.plot(roc_info['fpr'], roc_info['tpr'],
-                                 color=colors.get(param_key, 'white'), linewidth=1.2,
-                                 label=f'{param_key.replace("_", " ").title()} (AUC={roc_info["auc"]:.2f})')
-                    ax_extra.plot(roc_info['optimal_fpr'], roc_info['optimal_tpr'],
-                                 'o', color=colors.get(param_key, 'white'), markersize=6)
-                ax_extra.plot([0, 1], [0, 1], '--', color='gray', alpha=0.5)
-                ax_extra.set_xlabel('FPR', color='white', fontsize=7)
-                ax_extra.set_ylabel('TPR', color='white', fontsize=7)
-                ax_extra.set_title('ROC Curves', color='white', fontsize=8)
-                ax_extra.legend(fontsize=5, facecolor='#2E2E2E', labelcolor='white')
-                ax_extra.grid(True, linestyle='--', alpha=0.2)
-            elif has_convergence:
-                # Threshold convergence
-                history = engine.get_threshold_history()
-                if history['count']:
-                    colors_conv = {'fft_energy_ratio': '#E74C3C', 'exceedance_ratio': '#F39C12',
-                                   'relative_residual_ratio': '#3498DB'}
-                    for key, color in colors_conv.items():
-                        vals = history.get(key, [])
-                        if vals and any(v is not None for v in vals):
-                            ax_extra.plot(history['count'],
-                                          [v if v is not None else 0 for v in vals],
-                                          '-o', color=color, markersize=3, linewidth=1,
-                                          label=key.replace('_', ' ').title())
-                    ax_extra.set_xlabel('Signal Count', color='white', fontsize=7)
-                    ax_extra.set_ylabel('Threshold', color='white', fontsize=7)
-                    ax_extra.set_title('Threshold Convergence', color='white', fontsize=8)
-                    ax_extra.legend(fontsize=5, facecolor='#2E2E2E', labelcolor='white')
-                    ax_extra.grid(True, linestyle='--', alpha=0.2)
-
-        # Ensure axis labels and titles do not clip at smaller layout sizes.
+        if config_path:
+            self._calibration_config_path = config_path
+        can_show = engine is not None and engine.total_signals >= 1
         try:
-            self.figure.tight_layout(pad=1.0)
-        except Exception:
-            # tight_layout can occasionally fail on degenerate subplot grids —
-            # not worth bubbling up.
+            self.cal_diag_btn.config(state=tk.NORMAL if can_show else tk.DISABLED)
+        except tk.TclError:
             pass
+
+        # Push to the open diagnostics window if it exists and is alive.
+        try:
+            if (self._cal_diag_window is not None
+                    and self._cal_diag_window.winfo_exists()):
+                self._cal_diag_window.update_engine(
+                    engine, getattr(self, '_calibration_config_path', ""))
+        except tk.TclError:
+            self._cal_diag_window = None
+
+    def _open_cal_diagnostics(self):
+        """Open (or bring to front) the dedicated Cal. Diagnostics window."""
+        from usma.gui.cal_diagnostics import CalibrationDiagnosticsWindow
+        cfg_path = getattr(self, '_calibration_config_path', "")
+        try:
+            if (self._cal_diag_window is not None
+                    and self._cal_diag_window.winfo_exists()):
+                self._cal_diag_window.update_engine(self.calibration_engine,
+                                                    cfg_path)
+                self._cal_diag_window.deiconify()
+                self._cal_diag_window.lift()
+                return
+        except tk.TclError:
+            self._cal_diag_window = None
+        self._cal_diag_window = CalibrationDiagnosticsWindow(
+            self.winfo_toplevel(), self.calibration_engine,
+            config_path=cfg_path
+        )
 
     def _update_plot(self):
-        # Show / hide the calibration-diagnostics ⓘ info row depending on the
-        # current signal source selection.
-        try:
-            if self.signal_filter == "Cal. Diagnostics":
-                if not self.cal_info_frame.winfo_ismapped():
-                    self.cal_info_frame.pack(
-                        fill=tk.X, padx=5, pady=2,
-                        before=self.canvas.get_tk_widget(),
-                    )
-            else:
-                if self.cal_info_frame.winfo_ismapped():
-                    self.cal_info_frame.pack_forget()
-        except tk.TclError:
-            # The frame may not yet be constructed during initial setup.
-            pass
-
-        # Handle calibration diagnostics view
-        if self.signal_filter == "Cal. Diagnostics":
-            self._plot_calibration_diagnostics()
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
+        if not self.hit_history:
             return
 
-        if not self.hit_history or self.current_hit_index < 0:
-            return
-
-        if self.current_hit_index >= len(self.hit_history):
+        # Guard: snap current_hit_index into range or onto a filter match.
+        if self.current_hit_index < 0 or self.current_hit_index >= len(self.hit_history):
             self.current_hit_index = len(self.hit_history) - 1
+        if not self._matches_filter(self.hit_history[self.current_hit_index]):
+            # Search for the nearest-filter-matching hit, preferring later hits.
+            found = -1
+            for i in range(len(self.hit_history) - 1, -1, -1):
+                if self._matches_filter(self.hit_history[i]):
+                    found = i
+                    break
+            if found < 0:
+                return
+            self.current_hit_index = found
 
         hit_data = self.hit_history[self.current_hit_index]
         plot_type = self.plot_type_var.get()
@@ -470,20 +353,34 @@ class GraphViewerFrame(ttk.LabelFrame):
         self.canvas.draw_idle()
 
     def _plot_all_signals_stacked(self):
-        """When filter=All and plot=Signal, show all signal types stacked vertically."""
-        # Collect the latest hit of each type
-        latest_by_type = {}
-        for h in reversed(self.hit_history):
-            if h.signal_type not in latest_by_type:
-                latest_by_type[h.signal_type] = h
-            if len(latest_by_type) >= 3:
-                break
+        """When filter=All and plot=Signal, show all signal types stacked
+        vertically.
 
-        if not latest_by_type:
+        The currently selected hit (``self.current_hit_index``) is always
+        displayed at its correct slot in the stack. The two other signal
+        types show their most recent entry, so the user sees context while
+        navigating.
+        """
+        if not self.hit_history:
             return
 
-        type_order = [t for t in ["frf", "psd", "coherence"] if t in latest_by_type]
+        hits_by_type: Dict[str, LightweightHitData] = {}
+        selected: Optional[LightweightHitData] = None
+        if 0 <= self.current_hit_index < len(self.hit_history):
+            selected = self.hit_history[self.current_hit_index]
+            hits_by_type[selected.signal_type] = selected
+
+        # Fill in the other types with their latest hit — but do not
+        # overwrite the selected hit.
+        for h in reversed(self.hit_history):
+            if h.signal_type not in hits_by_type:
+                hits_by_type[h.signal_type] = h
+            if len(hits_by_type) >= 3:
+                break
+
+        type_order = [t for t in ["frf", "psd", "coherence"] if t in hits_by_type]
         n = len(type_order)
+        latest_by_type = hits_by_type
         color_map = {"frf": "cyan", "psd": "#FF9800", "coherence": "#00E676"}
 
         self.figure.clear()
@@ -495,13 +392,19 @@ class GraphViewerFrame(ttk.LabelFrame):
                 spine.set_color('white')
 
             hit = latest_by_type[sig_type]
+            is_selected = selected is not None and hit is selected
             if hit.signal_physical is not None and len(hit.signal_physical) > 0:
                 num_pts = len(hit.signal_physical)
                 freq_ax = np.linspace(hit.x_axis_min, hit.x_axis_max, num_pts)
-                ax.plot(freq_ax, hit.signal_physical, color=color_map.get(sig_type, "cyan"), linewidth=1.2)
+                ax.plot(freq_ax, hit.signal_physical,
+                        color=color_map.get(sig_type, "cyan"),
+                        linewidth=1.6 if is_selected else 1.2)
                 if sig_type == "coherence":
                     ax.set_ylim(-0.05, 1.05)
-            ax.set_title(f'[{sig_type.upper()}] {hit.hit_key}', color='white', fontsize=8)
+            title_prefix = "\u2605 " if is_selected else ""
+            title_color = "#F1C40F" if is_selected else "white"
+            ax.set_title(f'{title_prefix}[{sig_type.upper()}] {hit.hit_key}',
+                         color=title_color, fontsize=8)
             ax.set_ylabel(hit.y_axis_unit, color='white', fontsize=7)
             if idx == n - 1:
                 ax.set_xlabel('Frequency (Hz)', color='white', fontsize=7)

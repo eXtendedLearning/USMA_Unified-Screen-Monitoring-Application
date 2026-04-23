@@ -26,6 +26,11 @@ logs/
 image_logs/
 signal_logs/
 
+# Calibration session data (CSVs, PNGs, metadata) — kept locally for analysis
+# and publishing, not tracked in git.  Use "Save All to Data Folder" in the
+# Cal. Diagnostics window or the auto-save on calibration finish to populate.
+calibration_data/
+
 # READMEs and stuff
 UPDATE.md
 DAILY.md

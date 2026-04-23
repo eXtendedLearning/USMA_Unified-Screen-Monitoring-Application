@@ -35,10 +35,22 @@ class ImageLogger:
             gc.collect()
 
     def log_hit(self, frf_result: FRFAnalysisResult, frame_result: FrameAnalysisResult,
-                           frf_name: str, base_filename: str, all_rois: Dict[str, np.ndarray]):
+                           frf_name: str, base_filename: str, all_rois: Dict[str, np.ndarray],
+                           signal_type: Optional[str] = None):
         try:
             region = frame_result.active_regions[frf_name]
-        
+
+            # Resolve the correct AnalysisParams for plot annotations. If caller
+            # didn't specify, infer from the ROI's own roi_type so PSD hits use
+            # PSD thresholds instead of the FRF defaults.
+            if signal_type is None:
+                signal_type = region.roi_type if region.roi_type in ('frf', 'psd') else 'frf'
+            try:
+                params = self.app_config.analysis_params.get(signal_type) or \
+                         self.app_config.analysis_params['frf']
+            except (AttributeError, KeyError):
+                params = None
+
             title_info = (f"{frame_result.points_info.run} | H: {frame_result.points_info.hammer_point}"
                          f"{frame_result.points_info.hammer_dir} R: {frame_result.points_info.response_point}"
                          f"{frame_result.points_info.response_dir} | Overload: {frame_result.overload_text}")
@@ -54,20 +66,22 @@ class ImageLogger:
                     except Exception as e:
                         logger.error(f"Failed to save ROI image for '{r_name}': {e}")
 
-            if self.image_log_options.include_color_filter: 
+            if self.image_log_options.include_color_filter:
                 cv2.imwrite(f"image_logs/ColorMasks/{base_filename}_mask.jpg", frf_result.color_mask)
-        
+
             if self.image_log_options.include_signal_plot:
-                self._create_signal_plot_safe(frf_result, region, title_info, 
+                self._create_signal_plot_safe(frf_result, region, title_info,
                                              f"image_logs/Signals/{base_filename}_signal.png")
-        
+
             if self.image_log_options.include_fft_plot:
-                self._create_fft_plot_safe(frf_result, region, title_info, 
-                                          f"image_logs/FFT/{base_filename}_fft.png")
-        
+                self._create_fft_plot_safe(frf_result, region, title_info,
+                                          f"image_logs/FFT/{base_filename}_fft.png",
+                                          params=params)
+
             if self.image_log_options.include_lowpass_plot:
-                self._create_lowpass_comparison_plot_safe(frf_result, region, title_info, 
-                                                         f"image_logs/Lowpass/{base_filename}_lowpass.png")
+                self._create_lowpass_comparison_plot_safe(frf_result, region, title_info,
+                                                         f"image_logs/Lowpass/{base_filename}_lowpass.png",
+                                                         params=params)
         
             if self.image_log_options.include_residual_plot:
                 self._create_residual_plot_safe(frf_result, region, title_info, 
@@ -118,20 +132,21 @@ class ImageLogger:
         finally:
             self._cleanup_figure(fig)
 
-    def _create_fft_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion, 
-                              title_info: str, filename: str):
+    def _create_fft_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
+                              title_info: str, filename: str, params=None):
         """Thread-safe FFT plot creation."""
         fig = None
         try:
             from matplotlib.backends.backend_agg import FigureCanvasAgg # type: ignore
-        
+
             fig = Figure(figsize=(10, 5), dpi=150, facecolor='#1E1E1E')
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
-        
+
+            cutoff = params.fft_cutoff_frequency if params is not None else self.app_config.fft_cutoff_frequency
             ax.plot(frf_result.fft_freqs, frf_result.fft_mags, color='magenta', linewidth=1)
-            ax.axvline(x=self.app_config.fft_cutoff_frequency, color='yellow', 
-                      linestyle='--', linewidth=1, label=f'Cutoff: {self.app_config.fft_cutoff_frequency:.2f}')
+            ax.axvline(x=cutoff, color='yellow',
+                      linestyle='--', linewidth=1, label=f'Cutoff: {cutoff:.2f}')
             ax.set_xlim(0, 0.5)
             ax.set_xlabel('Normalized Frequency', color='white')
             ax.set_ylabel('Magnitude (A.U.)', color='white')
@@ -157,7 +172,7 @@ class ImageLogger:
             self._cleanup_figure(fig)
 
     def _create_lowpass_comparison_plot_safe(self, frf_result: FRFAnalysisResult, region: MonitoringRegion,
-                                             title_info: str, filename: str):
+                                             title_info: str, filename: str, params=None):
         """Thread-safe lowpass comparison plot creation."""
         fig = None
         try:
@@ -178,7 +193,9 @@ class ImageLogger:
             ax.plot(freq_axis, phys, 'w-', linewidth=2, label='Original', alpha=0.9)
             ax.plot(freq_axis, filtered, 'g--', linewidth=1.5, label='Lowpass Filtered')
         
-            filter_info = f'Cutoff: {self.app_config.lowpass_cutoff:.3f} | Order: {self.app_config.lowpass_filter_order}'
+            lp_cutoff = params.lowpass_cutoff if params is not None else self.app_config.lowpass_cutoff
+            lp_order = params.lowpass_filter_order if params is not None else self.app_config.lowpass_filter_order
+            filter_info = f'Cutoff: {lp_cutoff:.3f} | Order: {lp_order}'
             ax.set_title(f'Lowpass Filter Comparison\n{title_info}\n{filter_info}', 
                         color='white', fontsize=9)
             ax.set_xlabel('Frequency (Hz)', color='white')

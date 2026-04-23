@@ -23,12 +23,18 @@ class UNVExporter:
             digits = re.sub(r'\D', '', point_str)
             return int(digits) if digits else 1
 
-        def parse_dof(dir_str: Optional[str]) -> int: 
+        def parse_dof(dir_str: Optional[str]) -> int:
+            """Return a signed DOF: +X=1, +Y=2, +Z=3, -X=-1, -Y=-2, -Z=-3.
+
+            Preserves sign so that modal-analysis datasets don't collapse
+            opposing excitations/responses into the same unsigned DOF.
+            """
             if not dir_str: return 3
-            ds = dir_str.upper()
-            if ds.endswith('X'): return 1
-            if ds.endswith('Y'): return 2
-            return 3
+            ds = dir_str.upper().strip()
+            sign = -1 if ds.startswith('-') else 1
+            if ds.endswith('X'): return sign * 1
+            if ds.endswith('Y'): return sign * 2
+            return sign * 3
 
         try:
             filename = f"signal_logs/{base_filename}.unv"
@@ -68,8 +74,9 @@ class UNVExporter:
                 id_line4 = f"Reconstructed from {points.run}, region \"{frf_name}\""
                 f.write(f"{id_line4[:80]:<80}\n")
 
-                dir_char = {1: 'X', 2: 'Y', 3: 'Z'}.get(resp_dof, 'Z')
-                id_line5 = f"FRF\\\\{points.response_point}:+{dir_char}"
+                dir_char = {1: 'X', 2: 'Y', 3: 'Z'}.get(abs(resp_dof), 'Z')
+                dir_sign = '-' if resp_dof < 0 else '+'
+                id_line5 = f"FRF\\\\{points.response_point}:{dir_sign}{dir_char}"
                 f.write(f"{id_line5[:80]:<80}\n")
 
                 func_type = 4
