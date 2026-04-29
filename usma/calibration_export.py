@@ -45,12 +45,13 @@ CAL_DATA_ROOT = "calibration_data"
 # Public helpers
 # ---------------------------------------------------------------------------
 
-def get_session_folder(config_path: str) -> str:
+def get_session_folder(config_path: str, create: bool = True) -> str:
     """Return (and create if needed) the per-config calibration folder path."""
     stem = Path(config_path).stem if config_path else "default"
     folder = os.path.join(CAL_DATA_ROOT, stem)
-    os.makedirs(folder, exist_ok=True)
-    os.makedirs(os.path.join(folder, "signals"), exist_ok=True)
+    if create:
+        os.makedirs(folder, exist_ok=True)
+        os.makedirs(os.path.join(folder, "signals"), exist_ok=True)
     return folder
 
 
@@ -152,8 +153,7 @@ def _save_signal_plots(folder: str, engine: "HybridCalibrationEngine"):
     sig_folder = os.path.join(folder, "signals")
     os.makedirs(sig_folder, exist_ok=True)
 
-    for sig in engine._all_signals:
-        idx = sig.get("index", 0)
+    for idx, sig in enumerate(engine._all_signals):
         sig_type = sig.get("signal_type", "unknown")
         judgment = sig.get("judgment", "unknown")
         roi_name = sig.get("roi_name", f"signal_{idx}")

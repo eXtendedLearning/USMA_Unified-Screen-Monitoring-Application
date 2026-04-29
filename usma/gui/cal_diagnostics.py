@@ -617,7 +617,7 @@ class CalibrationDiagnosticsWindow(tk.Toplevel):
         file explorer (Windows Explorer / Finder / Nautilus)."""
         from usma import calibration_export as cal_export
         import subprocess, platform
-        folder = cal_export.get_session_folder(self.config_path)
+        folder = cal_export.get_session_folder(self.config_path, create=False)
         if not os.path.isdir(folder):
             messagebox.showinfo("No data folder",
                                 f"The folder does not exist yet:\n{folder}\n\n"

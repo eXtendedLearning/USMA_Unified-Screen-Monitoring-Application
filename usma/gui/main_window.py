@@ -32,7 +32,8 @@ class MonitorControlGUI:
         self.root = root
         self.calibration_mode = calibration_mode
         self.root.title(f"USMA v{APP_VERSION}")
-        self.root.geometry("1280x800")
+        self.ui_scale = tk.DoubleVar(value=float(self.root.tk.call('tk', 'scaling')))
+        self._set_initial_window_geometry()
 
         # Use provided config path or default
         default_config = "configs/default_config.json" if config_path is None else config_path
@@ -145,6 +146,7 @@ class MonitorControlGUI:
         self.load_button.pack(side=tk.LEFT, padx=2)
         self.edit_button = ttk.Button(config_frame, text="Edit...", command=self._launch_config_tool)
         self.edit_button.pack(side=tk.LEFT, padx=2)
+        ttk.Button(config_frame, text="View...", command=self._open_view_settings).pack(side=tk.LEFT, padx=2)
 
         # --- Controls ---
         control_frame = ttk.LabelFrame(frame, text="Controls")
@@ -312,6 +314,9 @@ class MonitorControlGUI:
         self.graph_viewer = GraphViewerFrame(right_outer)
         self.graph_viewer.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
         self.graph_viewer.calibration_engine = self.calibration_engine
+        self.graph_viewer.update_calibration_diagnostics(
+            self.calibration_engine, self.config_path.get()
+        )
 
         # --- Collapsible Console ---
         self._console_visible = tk.BooleanVar(value=False)
@@ -341,6 +346,95 @@ class MonitorControlGUI:
         """Resize canvas window when left panel resizes."""
         canvas_width = event.width
         self.main_canvas.itemconfig(self.canvas_window, width=canvas_width)
+
+    def _set_initial_window_geometry(self):
+        _left, _top, screen_w, screen_h = self._get_current_monitor_bounds()
+        width = min(1280, max(900, screen_w - 80))
+        height = min(800, max(650, screen_h - 100))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(900, 650)
+
+    def _get_current_monitor_bounds(self):
+        try:
+            import mss
+            self.root.update_idletasks()
+            center_x = self.root.winfo_x() + max(1, self.root.winfo_width()) // 2
+            center_y = self.root.winfo_y() + max(1, self.root.winfo_height()) // 2
+            with mss.mss() as sct:
+                for monitor in sct.monitors[1:]:
+                    left = int(monitor.get("left", 0))
+                    top = int(monitor.get("top", 0))
+                    width = int(monitor["width"])
+                    height = int(monitor["height"])
+                    if left <= center_x < left + width and top <= center_y < top + height:
+                        return left, top, width, height
+        except Exception:
+            pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _open_view_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("GUI View Settings")
+        win.transient(self.root)
+        win.resizable(False, False)
+
+        width_var = tk.IntVar(value=max(self.root.winfo_width(), 900))
+        height_var = tk.IntVar(value=max(self.root.winfo_height(), 650))
+        scale_var = tk.DoubleVar(value=float(self.root.tk.call('tk', 'scaling')))
+
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body, text="Window size").grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+        ttk.Label(body, text="Width").grid(row=1, column=0, sticky=tk.W, padx=(0, 6), pady=2)
+        ttk.Spinbox(body, from_=900, to=3840, increment=40, textvariable=width_var, width=8).grid(row=1, column=1, sticky=tk.W, pady=2)
+        ttk.Label(body, text="Height").grid(row=2, column=0, sticky=tk.W, padx=(0, 6), pady=2)
+        ttk.Spinbox(body, from_=650, to=2160, increment=40, textvariable=height_var, width=8).grid(row=2, column=1, sticky=tk.W, pady=2)
+
+        ttk.Label(body, text="Magnification").grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
+        ttk.Label(body, text="Scale").grid(row=4, column=0, sticky=tk.W, padx=(0, 6), pady=2)
+        ttk.Spinbox(body, from_=0.65, to=2.00, increment=0.05, textvariable=scale_var, width=8, format="%.2f").grid(row=4, column=1, sticky=tk.W, pady=2)
+
+        presets = ttk.Frame(body)
+        presets.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 4))
+        ttk.Button(presets, text="Fit Screen", command=lambda: self._fill_view_vars_from_screen(width_var, height_var, scale_var)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(presets, text="Compact", command=lambda: self._set_view_vars(width_var, height_var, scale_var, 1000, 700, 0.85)).pack(side=tk.LEFT)
+
+        actions = ttk.Frame(body)
+        actions.grid(row=6, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        ttk.Button(actions, text="Apply", command=lambda: self._apply_view_settings(win, width_var, height_var, scale_var)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(actions, text="Close", command=win.destroy).pack(side=tk.LEFT)
+
+        win.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{x}+{y}")
+        win.grab_set()
+
+    def _set_view_vars(self, width_var, height_var, scale_var, width, height, scale):
+        width_var.set(width)
+        height_var.set(height)
+        scale_var.set(scale)
+
+    def _fill_view_vars_from_screen(self, width_var, height_var, scale_var):
+        _left, _top, monitor_w, monitor_h = self._get_current_monitor_bounds()
+        width = max(900, monitor_w - 80)
+        height = max(650, monitor_h - 100)
+        scale = 0.85 if width < 1400 or height < 800 else 1.0
+        self._set_view_vars(width_var, height_var, scale_var, width, height, scale)
+
+    def _apply_view_settings(self, win, width_var, height_var, scale_var):
+        try:
+            width = max(900, int(width_var.get()))
+            height = max(650, int(height_var.get()))
+            scale = max(0.65, min(2.0, float(scale_var.get())))
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Invalid View Settings", "Use numeric width, height, and scale values.", parent=win)
+            return
+        self.root.tk.call('tk', 'scaling', scale)
+        self.ui_scale.set(scale)
+        self.root.geometry(f"{width}x{height}")
+        self.status_label.config(text=f"View updated: {width}x{height}, scale {scale:.2f}")
 
     def _toggle_console(self):
         """Show or hide the console panel."""
@@ -1094,7 +1188,7 @@ class MonitorControlGUI:
 
         # Separately ask about the on-disk calibration_data/ folder.
         config_path = self.config_path.get()
-        folder = cal_export.get_session_folder(config_path) if config_path else None
+        folder = cal_export.get_session_folder(config_path, create=False) if config_path else None
         if folder and os.path.isdir(folder):
             delete_folder = messagebox.askyesno(
                 "Delete Saved Calibration Files?",
@@ -1220,8 +1314,8 @@ class MonitorControlGUI:
                 "Falling back to default values."
             )
 
-        # Persist signals + diagnostic figures to calibration_data/ BEFORE
-        # clearing the engine so the full session is permanently available.
+        # Persist signals + diagnostic figures while keeping the engine intact
+        # so diagnostics stay available after calibration mode ends.
         folder = cal_export.save_all(self.config_path.get(),
                                      self.calibration_engine)
         if folder:
@@ -1230,13 +1324,8 @@ class MonitorControlGUI:
         # Save calibration data to config file
         self._save_calibration_to_config()
 
-        # Clear stored signals from the engine now that thresholds have been
-        # computed and applied. This prevents the similarity checker (used by
-        # live calibration after finishing) from comparing new hits against the
-        # finished session's population, which caused false "too similar" popups.
-        self.calibration_engine.clear_signals()
-        # Keep the graph viewer's reference in sync so diagnostic plots reflect
-        # the cleared state.
+        # Keep the graph viewer's reference in sync so diagnostics remain
+        # available after the calibration phase is finished.
         if hasattr(self, 'graph_viewer') and self.graph_viewer is not None:
             self.graph_viewer.calibration_engine = self.calibration_engine
             if hasattr(self.graph_viewer, 'update_calibration_diagnostics'):
@@ -1501,9 +1590,9 @@ class MonitorControlGUI:
         # Update calibration diagnostic plots
         self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
 
-        # Auto-save calibration data periodically
-        if total > 0 and total % 3 == 0:
-            self._save_calibration_to_config()
+        # Persist every live calibration addition so diagnostics and the
+        # calibration_data folder stay in step with the session.
+        self._save_calibration_to_config()
 
     def _poll_monitor_queue(self):
         if not self.monitor:

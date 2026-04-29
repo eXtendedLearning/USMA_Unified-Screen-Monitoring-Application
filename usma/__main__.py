@@ -1,6 +1,19 @@
 """Entry point for `python -m usma`."""
 import sys
 import os
+
+# DPI awareness must be set before Tk is imported so screen-capture coordinates
+# from mss and Tk window geometry use the same physical pixel space.
+if os.name == "nt":
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
 import tkinter as tk
 
 # Ensure working directory is the package root (for configs/, logs/, etc.)
