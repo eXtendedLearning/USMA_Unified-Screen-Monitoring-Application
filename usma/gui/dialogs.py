@@ -1,5 +1,6 @@
 import os
 import logging
+from typing import Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class StartupDialog(tk.Toplevel):
     """
-    Startup dialog for config selection or new calibration.
+    Startup dialog for config selection or new ROI definition.
 
     Attributes:
         result: str or None - Selected config path, "NEW_CALIBRATION", or None if cancelled
@@ -99,11 +100,11 @@ class StartupDialog(tk.Toplevel):
             info_frame.pack(fill=tk.X, padx=20, pady=10)
             ttk.Label(info_frame, text="No configuration files found.",
                       font=("Segoe UI", 10)).pack()
-            ttk.Label(info_frame, text="Let's create your first calibration!",
+            ttk.Label(info_frame, text="Let's create your first ROI definition!",
                       font=("Segoe UI", 9)).pack()
 
-        # Create new calibration button
-        new_cal_btn = ttk.Button(self, text="Create New Calibration",
+        # Create new ROI definition button
+        new_cal_btn = ttk.Button(self, text="Create New ROI Definition",
                                  command=self._on_new_calibration, width=30)
         new_cal_btn.pack(pady=(5, 20))
 
@@ -121,7 +122,7 @@ class StartupDialog(tk.Toplevel):
                 self.destroy()
 
     def _on_new_calibration(self):
-        """Set result to trigger new calibration."""
+        """Set result to trigger new ROI definition."""
         self.result = "NEW_CALIBRATION"
         self.destroy()
 
@@ -209,7 +210,7 @@ class CalibrationChoiceDialog(tk.Toplevel):
         self.destroy()
 
 
-# --- 4b. HSV CALIBRATION WINDOW ---
+# --- 4b. ROI TYPE SELECTION DIALOG ---
 class ROITypeDialog(tk.Toplevel):
     """
     Simple dialog to select ROI type after drawing a region.

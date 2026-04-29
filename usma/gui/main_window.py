@@ -669,6 +669,9 @@ class MonitorControlGUI:
             except (ZeroDivisionError, TypeError):
                 pass
             self._reload_calibration_from_current_config()
+            if self.is_overlay_on.get():
+                self._toggle_overlay()
+                self._toggle_overlay()
 
         self.root.deiconify()
 

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from typing import Dict, Optional
 from dataclasses import asdict
 
@@ -34,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigToolWindow(tk.Toplevel):
-    """Advanced Region & Color Configuration Tool with scrollable right panel."""
+    """Advanced ROI definition tool with scrollable right panel."""
 
     def __init__(self, parent, main_root, is_new_calibration=False, preload_config_path=None):
         super().__init__(parent)
-        self.title("Advanced Region & Color Configuration Tool")
+        self.title("Advanced ROI Definition Tool")
         self.main_root = main_root
         self.is_new_calibration = is_new_calibration
         self.saved_config_path = None  # Track if/where config was saved
@@ -131,8 +132,8 @@ class ConfigToolWindow(tk.Toplevel):
         capture_frame.pack(fill=tk.X, pady=5, padx=5)
         ttk.Button(capture_frame, text="Take Screenshot", command=self._take_screenshot).pack(pady=5, padx=5, fill=tk.X)
 
-        # HSV Calibration button
-        self.hsv_cal_btn = ttk.Button(capture_frame, text="Calibrate Color Filter",
+        # HSV color filter definition button
+        self.hsv_cal_btn = ttk.Button(capture_frame, text="Define Color Filter",
                                        command=self._open_hsv_calibration)
         self.hsv_cal_btn.pack(fill=tk.X, pady=(0, 5), padx=5)
         self.hsv_cal_btn.config(state=tk.DISABLED)  # Disabled by default
@@ -416,14 +417,14 @@ class ConfigToolWindow(tk.Toplevel):
             self.f_scale.pack_forget()
 
     def _update_hsv_button_state(self):
-        """Enable HSV calibration button only if wave regions exist."""
+        """Enable HSV color filter button only if wave regions exist."""
         wave_regions = {name: r for name, r in self.app_config.regions.items()
                         if r.roi_type in ('frf', 'psd', 'coherence')}
         state = tk.NORMAL if wave_regions else tk.DISABLED
         self.hsv_cal_btn.config(state=state)
 
     def _open_hsv_calibration(self):
-        """Open HSV calibration window."""
+        """Open HSV color filter definition window."""
         if self.screenshot is None:
             messagebox.showwarning("Warning", "Please take a screenshot first.", parent=self)
             return

@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import List, Optional, cast
 
 import numpy as np
 import cv2
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class HSVCalibrationWindow(tk.Toplevel):
     """
-    HSV color filter calibration with live preview.
+    HSV color filter definition with live preview.
     
     Features:
     - Vertical stacking of preview images (Original, Mask, Filtered)
@@ -45,7 +45,7 @@ class HSVCalibrationWindow(tk.Toplevel):
 
     def __init__(self, parent, screenshot, wave_regions, current_hsv_lower, current_hsv_upper):
         super().__init__(parent)
-        self.title("HSV Color Filter Calibration")
+        self.title("HSV Color Filter Definition")
         self.screenshot = screenshot
         self.wave_regions = wave_regions
         self.wave_regions = wave_regions

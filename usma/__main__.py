@@ -35,7 +35,7 @@ def main():
         main_root = tk.Tk()
         main_root.withdraw()  # Hide main GUI initially
 
-        # Open config tool for new calibration
+        # Open config tool for new ROI definition
         config_tool = ConfigToolWindow(main_root, main_root, is_new_calibration=True)
         config_tool.wait_window()
 

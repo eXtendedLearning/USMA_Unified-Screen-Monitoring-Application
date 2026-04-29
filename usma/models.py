@@ -12,7 +12,7 @@ from scipy.signal import butter, filtfilt
 logger = logging.getLogger(__name__)
 
 # --- Version Configuration ---
-APP_VERSION = "0.12.2"
+APP_VERSION = "0.12.3"
 
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
 @dataclass
