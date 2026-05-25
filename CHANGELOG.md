@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## v0.12.2 — Config Hot-Swap, Queue-Only GUI Bridge & Export Fixes *(current)*
+## v0.12.3 — Calibration Diagnostics Persistence, Overlay Geometry & View Scaling *(current)*
+
+- **Runtime version aligned to v0.12.3** — `APP_VERSION` now reports 0.12.3 across the package and portable launcher.
+- **DPI-aware startup on Windows** — the package entry point sets process DPI awareness before Tk starts, keeping Tk geometry and `mss` screen-capture coordinates in the same physical pixel space.
+- **Multi-monitor overlay geometry fixed** — ROI overlays now use the virtual desktop bounds and apply per-monitor offsets, so configured regions appear on the selected monitor even with non-primary or multi-monitor layouts.
+- **ROI selection wording clarified** — configuration dialogs now describe ROI setup in clearer, mode-specific language.
+- **Calibration diagnostics preserved after finish** — completed calibration sessions keep their stored signals available for diagnostics instead of clearing them immediately after thresholds are applied.
+- **Calibration export persistence tightened** — live calibration additions are saved immediately, signal plot filenames use stable enumeration, and clearing calibration no longer creates empty `calibration_data` folders.
+- **GUI view controls added** — the main window sizes itself to the active monitor and includes a `View...` dialog for window size and Tk scaling presets.
+
+## v0.12.2 — Config Hot-Swap, Queue-Only GUI Bridge & Export Fixes
 
 Follow-up based on an external Codex review of the launcher → monitor → analysis → export → GUI pipeline (see `TASKS.md`). All P0/P1/P2 code issues flagged in that review are addressed here; the optional test-suite task is deferred.
 
@@ -53,6 +63,17 @@ Follow-up based on an external Codex review of the launcher → monitor → anal
   - Cal. Diagnostics view gains an ⓘ header row (shown only when that signal source is active) linking to the `calibration_engine` page
   - Pure Tkinter — no new dependencies
 
+## v0.11.0 — Pixel-Space LP with Relative Residual Threshold
+
+- **LP analysis reworked** — operates on `signal_pixels` (pixel-space) instead of `signal_physical`, making it immune to Y-axis calibration errors
+- **Relative residual threshold** — new `relative_residual_ratio` parameter (default 0.10) replaces the absolute `residual_threshold`; the threshold is computed as `ratio × max(|residual|)` per signal, making it dimensionless and scale-invariant
+- **`sosfiltfilt` filter** — Butterworth filter switched from `b,a` + `filtfilt` to second-order sections + `sosfiltfilt`, fixing numerical instability at high filter orders (7+)
+- **New result fields** — `FRFAnalysisResult`, `LightweightHitData` gain `max_abs_residual` and `dynamic_threshold` for per-hit display and calibration
+- **Calibration engines updated** — `PercentileBoundaryEstimator` sweeps candidate ratios for best Good/Bad separation; `ROCYoudenEstimator` sweeps ratios with Youden's J; `BayesianThresholdEstimator` grid updated to [0.02, 0.50]
+- **Graph viewer** — residual plot shows pixel-space values with dynamic threshold; lowpass comparison Y-axis now labelled "pixels"; calibration diagnostics renamed to "Relative Residual Ratio"
+- **Config UI** — spinbox renamed "Res.Ratio:" with range 0.01–0.50 (fraction, not percent)
+- **Config migration** — old configs with `residual_threshold` automatically migrate to `relative_residual_ratio = 0.10` on load; backward-compat property aliases kept in `AppConfig`
+
 ## v0.10.1 — Calibration Robustness, Diagnostics & Layout Overhaul
 
 - **Stricter calibration similarity detection** — the "too similar" check in `_check_signal_similarity()` is no longer tripped by every new hit:
@@ -75,17 +96,6 @@ Follow-up based on an external Codex review of the launcher → monitor → anal
   - Right column promotes the `GraphViewerFrame` to the dominant widget; prominent classification result banner (large colored status light + overall label + compact metric rows) sits above it
   - **Collapsible console** — console is now hidden by default with a "Show Console" toggle; mounted via the new `GraphViewerFrame.setup_console()` entry point
   - All existing controls preserved — no feature removed
-
-## v0.11.0 — Pixel-Space LP with Relative Residual Threshold
-
-- **LP analysis reworked** — operates on `signal_pixels` (pixel-space) instead of `signal_physical`, making it immune to Y-axis calibration errors
-- **Relative residual threshold** — new `relative_residual_ratio` parameter (default 0.10) replaces the absolute `residual_threshold`; the threshold is computed as `ratio × max(|residual|)` per signal, making it dimensionless and scale-invariant
-- **`sosfiltfilt` filter** — Butterworth filter switched from `b,a` + `filtfilt` to second-order sections + `sosfiltfilt`, fixing numerical instability at high filter orders (7+)
-- **New result fields** — `FRFAnalysisResult`, `LightweightHitData` gain `max_abs_residual` and `dynamic_threshold` for per-hit display and calibration
-- **Calibration engines updated** — `PercentileBoundaryEstimator` sweeps candidate ratios for best Good/Bad separation; `ROCYoudenEstimator` sweeps ratios with Youden's J; `BayesianThresholdEstimator` grid updated to [0.02, 0.50]
-- **Graph viewer** — residual plot shows pixel-space values with dynamic threshold; lowpass comparison Y-axis now labelled "pixels"; calibration diagnostics renamed to "Relative Residual Ratio"
-- **Config UI** — spinbox renamed "Res.Ratio:" with range 0.01–0.50 (fraction, not percent)
-- **Config migration** — old configs with `residual_threshold` automatically migrate to `relative_residual_ratio = 0.10` on load; backward-compat property aliases kept in `AppConfig`
 
 ## v0.10.0 — Package Architecture
 

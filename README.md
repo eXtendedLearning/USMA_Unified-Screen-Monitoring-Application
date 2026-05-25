@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.11.0
+# USMA (Unified Screen Monitoring Application) — v0.12.3
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
@@ -20,7 +20,7 @@ Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extra
 USMA/
 ├── RUN_USMA_PORTABLE.bat   ← Start here
 ├── monitor_app.py           ← Thin launcher (delegates to usma/)
-├── usma/                    ← Package (v0.10.0 modular architecture)
+├── usma/                    ← Package (modular architecture introduced in v0.10.0)
 │   ├── models.py            ← Data classes, config, calibration engine
 │   ├── monitor.py           ← Screen capture & analysis orchestration
 │   ├── audio.py             ← Audio feedback
@@ -179,7 +179,7 @@ This means:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
-**Current version:** v0.10.0 — Package Architecture
+**Current version:** v0.12.3 — Calibration diagnostics persistence, overlay geometry, and view scaling
 
 ---
 
