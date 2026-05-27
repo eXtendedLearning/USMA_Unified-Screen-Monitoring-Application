@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## v0.12.3 — Calibration Diagnostics Persistence, Overlay Geometry & View Scaling *(current)*
+## v0.12.4 — FRF/PSD-Specific Calibration *(current)*
+
+- **Runtime version aligned to v0.12.4** — `APP_VERSION` now reports 0.12.4 across the package and portable launcher.
+- **Calibration panel adds separate FRF/PSD judgments** — new `Good FRF`, `Bad FRF`, `Skip FRF`, `Good PSD`, `Bad PSD`, and `Skip PSD` controls allow one hit to label the two signal families independently.
+- **Combined judgments still available** — the existing `Good`/`Bad` buttons classify both pending FRF and PSD signals together when both are available, while the existing `Skip` button skips the pending hit.
+- **FRF and PSD thresholds are estimated separately** — stored calibration samples are replayed by signal type, then applied to the matching FRF or PSD analysis parameters instead of copying one shared estimate to both.
+
+## v0.12.3 — Calibration Diagnostics Persistence, Overlay Geometry & View Scaling
 
 - **Runtime version aligned to v0.12.3** — `APP_VERSION` now reports 0.12.3 across the package and portable launcher.
 - **DPI-aware startup on Windows** — the package entry point sets process DPI awareness before Tk starts, keeping Tk geometry and `mss` screen-capture coordinates in the same physical pixel space.

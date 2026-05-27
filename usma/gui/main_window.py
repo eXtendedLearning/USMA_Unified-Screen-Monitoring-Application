@@ -99,7 +99,13 @@ class MonitorControlGUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # Apply loaded calibration estimates now that GUI is set up
-        if self.calibration_engine.can_estimate:
+        typed_estimates = self.calibration_engine.get_estimates_by_type()
+        if typed_estimates:
+            self._apply_calibrated_param_sets(typed_estimates)
+            level = self.calibration_engine.confidence_level
+            total = self.calibration_engine.total_signals
+            self._update_calibration_status(level, total)
+        elif self.calibration_engine.can_estimate:
             estimates = self.calibration_engine.get_estimates()
             if estimates:
                 self._apply_calibrated_params(estimates)
@@ -716,7 +722,10 @@ class MonitorControlGUI:
         if hasattr(self, 'cal_status_label_bar'):
             self._update_calibration_status(level, total)
 
-        if self.calibration_engine.can_estimate:
+        typed_estimates = self.calibration_engine.get_estimates_by_type()
+        if typed_estimates:
+            self._apply_calibrated_param_sets(typed_estimates)
+        elif self.calibration_engine.can_estimate:
             estimates = self.calibration_engine.get_estimates()
             if estimates:
                 self._apply_calibrated_params(estimates)
@@ -808,9 +817,12 @@ class MonitorControlGUI:
     def _setup_calibration_panel(self, parent):
         """Create the compact calibration mode panel."""
         # Calibration state
-        self.cal_good_count = 0
-        self.cal_bad_count = 0
+        self.cal_good_count = self.calibration_engine.good_count
+        self.cal_bad_count = self.calibration_engine.bad_count
         self.cal_pending_signal = None
+        self.cal_pending_signals = {}
+        self.cal_pending_judgments = {}
+        self.cal_pending_group_key = None
 
         self.cal_frame = ttk.LabelFrame(parent, text="Calibration")
         self.cal_frame.pack(fill=tk.X, pady=(5, 0))
@@ -829,24 +841,57 @@ class MonitorControlGUI:
 
         self.cal_good_btn = tk.Button(row1, text="\u2713 Good", font=("Segoe UI", 9, "bold"),
                                       bg="#27AE60", fg="white", width=7, state=tk.DISABLED,
-                                      command=lambda: self._cal_classify("good"))
+                                      command=lambda: self._cal_classify("good", "all"))
         self.cal_good_btn.pack(side=tk.LEFT, padx=2)
 
         self.cal_bad_btn = tk.Button(row1, text="\u2717 Bad", font=("Segoe UI", 9, "bold"),
                                      bg="#E74C3C", fg="white", width=7, state=tk.DISABLED,
-                                     command=lambda: self._cal_classify("bad"))
+                                     command=lambda: self._cal_classify("bad", "all"))
         self.cal_bad_btn.pack(side=tk.LEFT, padx=2)
 
         self.cal_ignore_btn = tk.Button(row1, text="Skip", font=("Segoe UI", 9),
                                         bg="#95A5A6", fg="white", width=5, state=tk.DISABLED,
-                                        command=lambda: self._cal_classify("ignore"))
+                                        command=lambda: self._cal_classify("ignore", "all"))
         self.cal_ignore_btn.pack(side=tk.LEFT, padx=2)
 
-        self.cal_counter_label = ttk.Label(row1, text="0G / 0B (need 3+3)",
+        self.cal_counter_label = ttk.Label(row1, text=self._cal_counter_text(),
                                            font=("Segoe UI", 8))
         self.cal_counter_label.pack(side=tk.LEFT, padx=(8, 2))
 
-        # Row 2: Status + Finish button
+        # Row 2/3: FRF- and PSD-specific classification buttons
+        self.cal_specific_buttons = {}
+        for signal_type, label in (('frf', 'FRF'), ('psd', 'PSD')):
+            type_row = ttk.Frame(self.cal_frame)
+            type_row.pack(fill=tk.X, padx=5, pady=(0, 2))
+            ttk.Label(type_row, text=f"{label}:", width=4,
+                      font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, padx=(2, 1))
+
+            good_btn = tk.Button(type_row, text=f"\u2713 Good {label}",
+                                 font=("Segoe UI", 8, "bold"),
+                                 bg="#27AE60", fg="white", width=10,
+                                 state=tk.DISABLED,
+                                 command=lambda st=signal_type: self._cal_classify("good", st))
+            good_btn.pack(side=tk.LEFT, padx=2)
+
+            bad_btn = tk.Button(type_row, text=f"\u2717 Bad {label}",
+                                font=("Segoe UI", 8, "bold"),
+                                bg="#E74C3C", fg="white", width=10,
+                                state=tk.DISABLED,
+                                command=lambda st=signal_type: self._cal_classify("bad", st))
+            bad_btn.pack(side=tk.LEFT, padx=2)
+
+            skip_btn = tk.Button(type_row, text=f"Skip {label}",
+                                 font=("Segoe UI", 8),
+                                 bg="#95A5A6", fg="white", width=9,
+                                 state=tk.DISABLED,
+                                 command=lambda st=signal_type: self._cal_classify("ignore", st))
+            skip_btn.pack(side=tk.LEFT, padx=2)
+
+            self.cal_specific_buttons[(signal_type, 'good')] = good_btn
+            self.cal_specific_buttons[(signal_type, 'bad')] = bad_btn
+            self.cal_specific_buttons[(signal_type, 'ignore')] = skip_btn
+
+        # Row 4: Status + Finish button
         row2 = ttk.Frame(self.cal_frame)
         row2.pack(fill=tk.X, padx=5, pady=(0, 3))
 
@@ -884,131 +929,283 @@ class MonitorControlGUI:
             'psd_exceedance_ratio_threshold': tk.DoubleVar(value=cfg.psd_exceedance_ratio_threshold)
         }
 
-    def _cal_on_new_signal(self, lightweight_data: LightweightHitData):
-        """Called when a new signal arrives in calibration mode — enable buttons."""
-        if lightweight_data.signal_type.lower() not in ('frf', 'psd'):
-            return
-            
-        self.cal_pending_signal = lightweight_data
-        self.cal_good_btn.config(state=tk.NORMAL)
-        self.cal_bad_btn.config(state=tk.NORMAL)
-        self.cal_ignore_btn.config(state=tk.NORMAL)
-        sig_type = lightweight_data.signal_type.upper()
-        self.cal_status_label.config(text=f"[{sig_type}] Signal received — classify it now")
+    def _cal_signal_type(self, lightweight_data: LightweightHitData) -> str:
+        return (lightweight_data.signal_type or "frf").lower()
 
-    def _cal_classify(self, judgment: str):
-        """Handle Good/Bad/Ignore button click during calibration."""
-        if self.cal_pending_signal is None:
-            return
+    def _cal_group_key(self, lightweight_data: LightweightHitData) -> str:
+        hit_key = lightweight_data.hit_key or ""
+        for prefix in ("psd_", "frf_"):
+            if hit_key.startswith(prefix):
+                hit_key = hit_key[len(prefix):]
+        return f"{lightweight_data.run}|{hit_key}"
 
-        sig = self.cal_pending_signal
-        self.cal_pending_signal = None
+    def _cal_expected_signal_types(self) -> set:
+        expected = set()
+        try:
+            for region in self.monitor.app_config.regions.values():
+                if not getattr(region, 'enabled', True):
+                    continue
+                roi_type = str(getattr(region, 'roi_type', '')).lower()
+                if roi_type in ('frf', 'psd'):
+                    expected.add(roi_type)
+        except Exception:
+            pass
+        if not expected:
+            expected.update(getattr(self, 'cal_pending_signals', {}).keys())
+        return expected
 
-        # Disable buttons until next signal
-        self.cal_good_btn.config(state=tk.DISABLED)
-        self.cal_bad_btn.config(state=tk.DISABLED)
-        self.cal_ignore_btn.config(state=tk.DISABLED)
+    def _cal_display_signal_types(self) -> set:
+        display_types = self._cal_expected_signal_types()
+        if not display_types:
+            display_types = {'frf', 'psd'}
+        return display_types
 
-        judgment_upper = judgment.upper()
+    def _cal_unresolved_types(self) -> list:
+        if not getattr(self, 'cal_pending_group_key', None):
+            return []
+        expected = self._cal_expected_signal_types()
+        expected.update(self.cal_pending_signals.keys())
+        return [st for st in ('frf', 'psd')
+                if st in expected and self.cal_pending_judgments.get(st) is None]
 
-        if judgment_upper in ("GOOD", "BAD"):
-            # Check signal similarity before adding
-            is_similar, similar_idx = self._check_signal_similarity(sig)
-            if is_similar:
-                answer = messagebox.askyesno(
-                    "Similar Signal Detected",
-                    f"This signal is very similar to calibration signal #{similar_idx + 1}.\n\n"
-                    "For best results, use hits from different locations or conditions.\n"
-                    "Classify anyway?",
-                    parent=self.root
-                )
-                if not answer:
-                    self.cal_status_label.config(text="Signal skipped (too similar) — waiting...")
-                    return
+    def _cal_counter_text(self) -> str:
+        counts = self.calibration_engine.get_counts_by_type()
+        parts = []
+        for signal_type, label in (('frf', 'FRF'), ('psd', 'PSD')):
+            if signal_type not in self._cal_display_signal_types():
+                continue
+            c = counts.get(signal_type, {'GOOD': 0, 'BAD': 0})
+            ready = " ready" if c['GOOD'] >= 3 and c['BAD'] >= 3 else ""
+            parts.append(f"{label} {c['GOOD']}G/{c['BAD']}B{ready}")
+        return " | ".join(parts) if parts else "0G / 0B"
 
-            # Build signal data dict from LightweightHitData
-            signal_data = {
-                'signal_physical': sig.signal_physical,
-                'fft_freqs': sig.fft_freqs,
-                'fft_mags': sig.fft_mags,
-                'residual_physical': sig.residual_physical,
-                'energy_ratio': sig.energy_ratio,
-                'exceedance_ratio': sig.exceedance_ratio,
-                'exceedance_count': sig.exceedance_count,
-                'total_energy': sig.total_energy,
-                'high_freq_energy': sig.high_freq_energy,
-                'max_abs_residual': sig.max_abs_residual,
-                'relative_residual_ratio': (
-                    self.monitor.app_config.psd_relative_residual_ratio
-                    if sig.signal_type == 'psd'
-                    else self.monitor.app_config.relative_residual_ratio
-                ),
-                'signal_vector': sig.residual_physical,  # pixel-space; used by LP cutoff sweep
-                'roi_name': sig.hit_key,
-                'signal_type': sig.signal_type,
-                'source': 'calibration_phase',
-            }
+    def _cal_need_text(self) -> str:
+        counts = self.calibration_engine.get_counts_by_type()
+        needs = []
+        for signal_type, label in (('frf', 'FRF'), ('psd', 'PSD')):
+            if signal_type not in self._cal_display_signal_types():
+                continue
+            c = counts.get(signal_type, {'GOOD': 0, 'BAD': 0})
+            need_good = max(0, 3 - c['GOOD'])
+            need_bad = max(0, 3 - c['BAD'])
+            if need_good or need_bad:
+                needs.append(f"{label} {need_good}G/{need_bad}B")
+        return "Need " + ", ".join(needs) if needs else "Ready"
 
-            # Feed to calibration engine
-            self.calibration_engine.add_signal(signal_data, judgment_upper)
-
-            if judgment_upper == "GOOD":
-                self.cal_good_count += 1
-                logger.info(f"[CAL] Signal {sig.hit_key} classified as GOOD "
-                            f"(E.Ratio={sig.energy_ratio:.4f}, "
-                            f"Exc.Ratio={sig.exceedance_ratio:.2f}) "
-                            f"[{self.cal_good_count}G total]")
-            else:
-                self.cal_bad_count += 1
-                logger.info(f"[CAL] Signal {sig.hit_key} classified as BAD "
-                            f"(E.Ratio={sig.energy_ratio:.4f}, "
-                            f"Exc.Ratio={sig.exceedance_ratio:.2f}) "
-                            f"[{self.cal_bad_count}B total]")
-        else:
-            logger.info(f"[CAL] Signal {sig.hit_key} IGNORED")
-
-        total = self.cal_good_count + self.cal_bad_count
-
-        # Update counter label
-        self.cal_counter_label.config(
-            text=f"Signals: {self.cal_good_count} Good, {self.cal_bad_count} Bad"
-                 f" {'(need 3+3 minimum)' if not self.calibration_engine.meets_minimum else '(ready)'}"
+    def _cal_update_button_states(self):
+        has_group = bool(getattr(self, 'cal_pending_group_key', None))
+        unresolved = set(self._cal_unresolved_types())
+        available_unresolved = [
+            st for st in ('frf', 'psd')
+            if st in self.cal_pending_signals and st in unresolved
+        ]
+        all_ready = bool(available_unresolved) and all(
+            self.cal_pending_judgments.get(st) is not None
+            or st in self.cal_pending_signals
+            for st in unresolved
         )
 
-        # Update status bar from engine's actual confidence level
+        both_state = tk.NORMAL if has_group and all_ready else tk.DISABLED
+        skip_state = tk.NORMAL if has_group and unresolved else tk.DISABLED
+        self.cal_good_btn.config(state=both_state)
+        self.cal_bad_btn.config(state=both_state)
+        self.cal_ignore_btn.config(state=skip_state)
+
+        expected = self._cal_expected_signal_types()
+        expected.update(self.cal_pending_signals.keys())
+        for signal_type in ('frf', 'psd'):
+            has_signal = signal_type in self.cal_pending_signals
+            is_unresolved = signal_type in unresolved
+            specific_state = tk.NORMAL if has_signal and is_unresolved else tk.DISABLED
+            skip_specific_state = (
+                tk.NORMAL if has_group and signal_type in expected and is_unresolved
+                else tk.DISABLED
+            )
+            self.cal_specific_buttons[(signal_type, 'good')].config(state=specific_state)
+            self.cal_specific_buttons[(signal_type, 'bad')].config(state=specific_state)
+            self.cal_specific_buttons[(signal_type, 'ignore')].config(state=skip_specific_state)
+
+    def _cal_clear_pending_group(self):
+        self.cal_pending_signal = None
+        self.cal_pending_signals = {}
+        self.cal_pending_judgments = {}
+        self.cal_pending_group_key = None
+        self._cal_update_button_states()
+
+    def _build_calibration_signal_data(self, sig: LightweightHitData, source: str) -> dict:
+        return {
+            'signal_physical': sig.signal_physical,
+            'fft_freqs': sig.fft_freqs,
+            'fft_mags': sig.fft_mags,
+            'residual_physical': sig.residual_physical,
+            'energy_ratio': sig.energy_ratio,
+            'exceedance_ratio': sig.exceedance_ratio,
+            'exceedance_count': sig.exceedance_count,
+            'total_energy': sig.total_energy,
+            'high_freq_energy': sig.high_freq_energy,
+            'max_abs_residual': sig.max_abs_residual,
+            'relative_residual_ratio': (
+                self.monitor.app_config.psd_relative_residual_ratio
+                if self._cal_signal_type(sig) == 'psd'
+                else self.monitor.app_config.relative_residual_ratio
+            ),
+            'signal_vector': sig.residual_physical,
+            'roi_name': sig.hit_key,
+            'signal_type': self._cal_signal_type(sig),
+            'source': source,
+        }
+
+    def _cal_record_signal(self, sig: LightweightHitData, judgment_upper: str) -> bool:
+        is_similar, similar_idx = self._check_signal_similarity(sig)
+        if is_similar:
+            answer = messagebox.askyesno(
+                "Similar Signal Detected",
+                f"This signal is very similar to calibration signal #{similar_idx + 1}.\n\n"
+                "For best results, use hits from different locations or conditions.\n"
+                "Classify anyway?",
+                parent=self.root
+            )
+            if not answer:
+                logger.info(f"[CAL] Signal {sig.hit_key} skipped (too similar)")
+                return False
+
+        signal_data = self._build_calibration_signal_data(sig, 'calibration_phase')
+        self.calibration_engine.add_signal(signal_data, judgment_upper)
+
+        signal_type = self._cal_signal_type(sig)
+        counts = self.calibration_engine.get_counts_by_type()[signal_type]
+        logger.info(
+            f"[CAL] {signal_type.upper()} signal {sig.hit_key} "
+            f"classified as {judgment_upper} "
+            f"(E.Ratio={sig.energy_ratio:.4f}, Exc.Ratio={sig.exceedance_ratio:.2f}) "
+            f"[{counts['GOOD']}G/{counts['BAD']}B for {signal_type.upper()}]"
+        )
+        return True
+
+    def _cal_refresh_engine_outputs(self) -> dict:
+        self.cal_good_count = self.calibration_engine.good_count
+        self.cal_bad_count = self.calibration_engine.bad_count
+        total = self.calibration_engine.total_signals
         level = self.calibration_engine.confidence_level
+
+        self.cal_counter_label.config(text=self._cal_counter_text())
         self._update_calibration_status(level, total)
+        self.graph_viewer.update_calibration_diagnostics(
+            self.calibration_engine, self.config_path.get())
 
-        # Update calibration diagnostic plots
-        self.graph_viewer.update_calibration_diagnostics(self.calibration_engine, self.config_path.get())
-
-        # If we can estimate, compute and display parameters
-        if self.calibration_engine.can_estimate:
-            estimates = self.calibration_engine.get_estimates()
-            if estimates:
-                self._apply_calibrated_params(estimates)
-                self.cal_status_label.config(
-                    text=f"Level {level} — Parameters updated from {total} signals"
-                )
+        typed_estimates = self.calibration_engine.get_estimates_by_type()
+        if typed_estimates:
+            self._apply_calibrated_param_sets(typed_estimates)
             self.cal_finish_btn.config(state=tk.NORMAL)
         else:
-            need_good = max(0, 3 - self.cal_good_count)
-            need_bad = max(0, 3 - self.cal_bad_count)
-            parts = []
-            if need_good > 0:
-                parts.append(f"{need_good} more Good")
-            if need_bad > 0:
-                parts.append(f"{need_bad} more Bad")
-            if parts:
-                self.cal_status_label.config(
-                    text=f"Need {' and '.join(parts)} signal(s)"
-                )
-            else:
-                self.cal_status_label.config(
-                    text=f"Classified as {judgment_upper} — waiting for next signal..."
-                )
+            self.cal_finish_btn.config(state=tk.DISABLED)
+        return typed_estimates
 
-    def _apply_calibrated_params(self, estimates: dict):
+    def _cal_on_new_signal(self, lightweight_data: LightweightHitData):
+        """Called when a new signal arrives in calibration mode."""
+        signal_type = self._cal_signal_type(lightweight_data)
+        if signal_type not in ('frf', 'psd'):
+            return
+
+        group_key = self._cal_group_key(lightweight_data)
+        unresolved = self._cal_unresolved_types()
+        if self.cal_pending_group_key and group_key != self.cal_pending_group_key and unresolved:
+            pending = "/".join(st.upper() for st in unresolved)
+            self.cal_status_label.config(text=f"Classify or skip pending {pending} first")
+            logger.info(
+                f"[CAL] Ignored {signal_type.upper()} signal {lightweight_data.hit_key}; "
+                f"pending group {self.cal_pending_group_key} still unresolved"
+            )
+            return
+
+        if group_key != self.cal_pending_group_key:
+            self.cal_pending_signals = {}
+            self.cal_pending_judgments = {}
+            self.cal_pending_group_key = group_key
+
+        self.cal_pending_signals[signal_type] = lightweight_data
+        self.cal_pending_judgments.setdefault(signal_type, None)
+        self.cal_pending_signal = lightweight_data
+        self._cal_update_button_states()
+
+        available = "/".join(st.upper() for st in self.cal_pending_signals.keys())
+        unresolved = self._cal_unresolved_types()
+        if unresolved:
+            self.cal_finish_btn.config(state=tk.DISABLED)
+            waiting = "/".join(st.upper() for st in unresolved)
+            self.cal_status_label.config(
+                text=f"[{available}] Signal received - classify or skip {waiting}"
+            )
+        else:
+            self.cal_status_label.config(text=f"[{available}] Signal received")
+
+    def _cal_classify(self, judgment: str, target: str = "all"):
+        """Handle Good/Bad/Skip button clicks during calibration."""
+        if not self.cal_pending_group_key:
+            return
+
+        judgment_upper = judgment.upper()
+        if judgment_upper == "IGNORE":
+            judgment_upper = "SKIP"
+
+        if target == "all":
+            if judgment_upper in ("GOOD", "BAD"):
+                targets = [
+                    st for st in ('frf', 'psd')
+                    if st in self.cal_pending_signals
+                    and self.cal_pending_judgments.get(st) is None
+                ]
+            else:
+                targets = self._cal_unresolved_types()
+        else:
+            targets = [target] if target in ('frf', 'psd') else []
+
+        if not targets:
+            return
+
+        handled = []
+        for signal_type in targets:
+            if self.cal_pending_judgments.get(signal_type) is not None:
+                continue
+            sig = self.cal_pending_signals.get(signal_type)
+            if judgment_upper in ("GOOD", "BAD"):
+                if sig is None:
+                    continue
+                recorded = self._cal_record_signal(sig, judgment_upper)
+                self.cal_pending_judgments[signal_type] = (
+                    judgment_upper if recorded else "SKIP"
+                )
+                handled.append(f"{signal_type.upper()} {judgment_upper if recorded else 'SKIP'}")
+            else:
+                self.cal_pending_judgments[signal_type] = "SKIP"
+                if sig is not None:
+                    logger.info(f"[CAL] {signal_type.upper()} signal {sig.hit_key} SKIPPED")
+                handled.append(f"{signal_type.upper()} SKIP")
+
+        typed_estimates = self._cal_refresh_engine_outputs()
+        remaining = self._cal_unresolved_types()
+        self._cal_update_button_states()
+
+        if remaining:
+            self.cal_finish_btn.config(state=tk.DISABLED)
+            self.cal_status_label.config(
+                text=f"{', '.join(handled)} - classify or skip "
+                     f"{'/'.join(st.upper() for st in remaining)}"
+            )
+            return
+
+        self._cal_clear_pending_group()
+        if typed_estimates:
+            ready = "/".join(st.upper() for st in typed_estimates.keys())
+            self.cal_status_label.config(
+                text=f"{', '.join(handled)} - {ready} parameters updated"
+            )
+        else:
+            self.cal_status_label.config(
+                text=f"{', '.join(handled)} - {self._cal_need_text()}"
+            )
+
+    def _apply_calibrated_params(self, estimates: dict, signal_type: Optional[str] = None):
         """Apply estimated parameters to app_config and update GUI display."""
         cfg = self.monitor.app_config
 
@@ -1021,15 +1218,16 @@ class MonitorControlGUI:
         }
 
         applied = {}
-        for est_key, cfg_attr in param_map.items():
-            if est_key in estimates and estimates[est_key] is not None:
-                val = estimates[est_key]
-                setattr(cfg, cfg_attr, val)
-                applied[est_key] = val
-                # Also update PSD parameters (same calibration applies)
-                psd_attr = f'psd_{cfg_attr}'
-                if hasattr(cfg, psd_attr):
-                    setattr(cfg, psd_attr, val)
+        target_types = (signal_type,) if signal_type in ('frf', 'psd') else ('frf', 'psd')
+        for target_type in target_types:
+            attr_prefix = '' if target_type == 'frf' else 'psd_'
+            for est_key, cfg_attr in param_map.items():
+                if est_key in estimates and estimates[est_key] is not None:
+                    val = estimates[est_key]
+                    target_attr = f'{attr_prefix}{cfg_attr}'
+                    if hasattr(cfg, target_attr):
+                        setattr(cfg, target_attr, val)
+                        applied[f'{attr_prefix}{est_key}'] = val
 
         # Update GUI spinbox variables if they exist
         if hasattr(self, 'param_vars'):
@@ -1044,6 +1242,12 @@ class MonitorControlGUI:
             logger.info(f"[CAL] Applied calibrated parameters: "
                         + ", ".join(f"{k}={v:.6f}" for k, v in applied.items()))
 
+    def _apply_calibrated_param_sets(self, estimates_by_type: dict):
+        """Apply any available FRF/PSD-specific calibration estimates."""
+        for signal_type, estimates in estimates_by_type.items():
+            if estimates:
+                self._apply_calibrated_params(estimates, signal_type=signal_type)
+
     def _save_calibration_to_config(self):
         """Persist calibration data to the config JSON file."""
         config_path = self.config_path.get()
@@ -1055,15 +1259,17 @@ class MonitorControlGUI:
             config_data['_calibration'] = self.calibration_engine.to_dict()
             # Also update _metadata with calibrated threshold values
             meta = config_data.get('_metadata', {})
-            estimates = self.calibration_engine.get_estimates()
-            if estimates:
+            estimates_by_type = self.calibration_engine.get_estimates_by_type()
+            if not estimates_by_type and self.calibration_engine.can_estimate:
+                pooled = self.calibration_engine.get_estimates()
+                if pooled:
+                    estimates_by_type = {'frf': pooled, 'psd': pooled}
+            for signal_type, estimates in estimates_by_type.items():
+                prefix = '' if signal_type == 'frf' else 'psd_'
                 for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
                             'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
                     if key in estimates:
-                        meta[key] = estimates[key]
-                        psd_key = f'psd_{key}'
-                        if psd_key in meta or psd_key.replace('psd_', '') in meta:
-                            meta[psd_key] = estimates[key]
+                        meta[f'{prefix}{key}'] = float(estimates[key])
             config_data['_metadata'] = meta
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=2)
@@ -1092,8 +1298,12 @@ class MonitorControlGUI:
 
         new_phys = new_signal.signal_physical
         new_fft = new_signal.fft_mags
+        new_type = self._cal_signal_type(new_signal)
 
         for i, old in enumerate(stored):
+            old_type = str(old.get('signal_type', 'frf')).lower()
+            if old_type != new_type:
+                continue
             old_phys = old.get('signal_physical')
             old_fft = old.get('fft_mags')
 
@@ -1220,8 +1430,13 @@ class MonitorControlGUI:
             self.cal_good_count = 0
             self.cal_bad_count = 0
             self.cal_pending_signal = None
+            self.cal_pending_signals = {}
+            self.cal_pending_judgments = {}
+            self.cal_pending_group_key = None
+            if hasattr(self, 'cal_specific_buttons'):
+                self._cal_update_button_states()
         if hasattr(self, 'cal_counter_label') and self.cal_counter_label.winfo_exists():
-            self.cal_counter_label.config(text="0G / 0B (need 3+3)")
+            self.cal_counter_label.config(text=self._cal_counter_text())
         if hasattr(self, 'cal_status_label') and self.cal_status_label.winfo_exists():
             self.cal_status_label.config(text="Calibration cleared — waiting for signals...")
         if hasattr(self, 'cal_finish_btn') and self.cal_finish_btn.winfo_exists():
@@ -1274,9 +1489,42 @@ class MonitorControlGUI:
                     f"{engine.bad_count}B = {total} signals, Level {level}")
 
         # Compute final estimates
-        estimates = engine.get_estimates()
+        estimates_by_type = engine.get_estimates_by_type()
+        estimates = None if estimates_by_type else engine.get_estimates()
 
-        if estimates:
+        if estimates_by_type:
+            # Apply FRF/PSD-specific estimates to config
+            self._apply_calibrated_param_sets(estimates_by_type)
+
+            logger.info("[CAL] Final calibrated parameters:")
+            for signal_type, estimates_for_type in estimates_by_type.items():
+                logger.info(f"  [{signal_type.upper()}]")
+                for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
+                            'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                    if key in estimates_for_type:
+                        logger.info(f"    {key} = {estimates_for_type[key]:.6f}")
+
+            summary_lines = [
+                f"Calibration complete - Level {level} ({total} signals)\n",
+                "Estimated parameters:"
+            ]
+            for signal_type, estimates_for_type in estimates_by_type.items():
+                summary_lines.append(f"\n{signal_type.upper()}:")
+                for key in ('fft_energy_ratio_threshold', 'exceedance_ratio_threshold',
+                            'relative_residual_ratio', 'fft_cutoff_frequency', 'lowpass_cutoff'):
+                    if key in estimates_for_type:
+                        default_val = {
+                            'fft_energy_ratio_threshold': 0.006,
+                            'exceedance_ratio_threshold': 0.7,
+                            'relative_residual_ratio': 0.10,
+                            'fft_cutoff_frequency': 0.07,
+                            'lowpass_cutoff': 0.07,
+                        }.get(key, 0)
+                        summary_lines.append(
+                            f"  {key}: {estimates_for_type[key]:.6f}  (was {default_val})"
+                        )
+            messagebox.showinfo("Calibration Complete", "\n".join(summary_lines))
+        elif estimates:
             # Apply to config
             self._apply_calibrated_params(estimates)
 
@@ -1547,20 +1795,7 @@ class MonitorControlGUI:
                 return
 
         # Build signal data dict
-        signal_data = {
-            'signal_physical': sig.signal_physical,
-            'fft_freqs': sig.fft_freqs,
-            'fft_mags': sig.fft_mags,
-            'residual_physical': sig.residual_physical,
-            'energy_ratio': sig.energy_ratio,
-            'exceedance_ratio': sig.exceedance_ratio,
-            'exceedance_count': sig.exceedance_count,
-            'total_energy': sig.total_energy,
-            'high_freq_energy': sig.high_freq_energy,
-            'roi_name': sig.hit_key,
-            'signal_type': sig.signal_type,
-            'source': 'live_monitoring',
-        }
+        signal_data = self._build_calibration_signal_data(sig, 'live_monitoring')
 
         # Feed to calibration engine
         self.calibration_engine.add_signal(signal_data, judgment)
@@ -1573,16 +1808,16 @@ class MonitorControlGUI:
                     f"[{self.calibration_engine.good_count}G + "
                     f"{self.calibration_engine.bad_count}B = {total}, Level {level}]")
 
-        # Update params if we can estimate
-        if self.calibration_engine.can_estimate:
-            estimates = self.calibration_engine.get_estimates()
-            if estimates:
-                self._apply_calibrated_params(estimates)
-                self.live_cal_status.config(
-                    text=f"Level {level} — {total} signals — params updated"
-                )
+        # Update params if we can estimate this signal family
+        estimates = self.calibration_engine.get_estimates_for_type(
+            self._cal_signal_type(sig))
+        if estimates:
+            self._apply_calibrated_params(estimates, signal_type=self._cal_signal_type(sig))
+            self.live_cal_status.config(
+                text=f"Level {level} - {total} signals - params updated"
+            )
         else:
-            self.live_cal_status.config(text=f"{judgment} — {total} signals (need 3+3)")
+            self.live_cal_status.config(text=f"{judgment} - {total} signals (need 3+3)")
 
         # Update calibration status bar
         self._update_calibration_status(level, total)

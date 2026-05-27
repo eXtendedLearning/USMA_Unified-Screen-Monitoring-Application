@@ -268,6 +268,16 @@ class CalibrationDiagnosticsWindow(tk.Toplevel):
             rows = [r for r in rows if r['signal_type'] == 'psd']
         return rows
 
+    def _estimates_for_filter(self) -> dict:
+        """Return threshold estimates matching the active FRF/PSD filter."""
+        if self.engine is None:
+            return {}
+        if self._filter_value == 'FRF only':
+            return self.engine.get_estimates_for_type('frf') or {}
+        if self._filter_value == 'PSD only':
+            return self.engine.get_estimates_for_type('psd') or {}
+        return self.engine.get_estimates() if self.engine.can_estimate else {}
+
     def _populate_tree(self):
         self.tree.delete(*self.tree.get_children())
         rows = self._visible_rows()
@@ -420,8 +430,7 @@ class CalibrationDiagnosticsWindow(tk.Toplevel):
         dist_data = self.engine.get_distribution_data()
         roc_data = self.engine.get_roc_data()
         bayesian_ci = self.engine.get_bayesian_ci()
-        estimates = (self.engine.get_estimates()
-                     if self.engine.can_estimate else {})
+        estimates = self._estimates_for_filter()
 
         has_roc = bool(roc_data)
         has_convergence = self.engine.total_signals >= 6

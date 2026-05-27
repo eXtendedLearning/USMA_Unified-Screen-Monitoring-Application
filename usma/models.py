@@ -12,7 +12,7 @@ from scipy.signal import butter, filtfilt
 logger = logging.getLogger(__name__)
 
 # --- Version Configuration ---
-APP_VERSION = "0.12.3"
+APP_VERSION = "0.12.4"
 
 # --- 2. DATA CLASSES: CORE DATA STRUCTURES ---
 @dataclass
@@ -576,6 +576,32 @@ class HybridCalibrationEngine:
         self.bad_count: int = 0
         self._all_signals: List[dict] = []
 
+    @staticmethod
+    def _normalise_signal_type(signal_type: Any) -> str:
+        signal_type = str(signal_type or "frf").lower()
+        return signal_type if signal_type in ("frf", "psd") else "frf"
+
+    @staticmethod
+    def _prepare_signal_for_replay(signal_data: dict) -> dict:
+        """Return a copy with persisted lists restored to ndarray values."""
+        sig_copy = dict(signal_data)
+        for key in ('fft_freqs', 'fft_mags', 'residual_physical',
+                    'signal_physical', 'signal_vector'):
+            if key in sig_copy and isinstance(sig_copy[key], list):
+                sig_copy[key] = np.array(sig_copy[key])
+        return sig_copy
+
+    def _filtered_engine(self, signal_type: str) -> 'HybridCalibrationEngine':
+        """Replay stored signals of one type into a temporary engine."""
+        signal_type = self._normalise_signal_type(signal_type)
+        engine = HybridCalibrationEngine()
+        for sig in self._all_signals:
+            if self._normalise_signal_type(sig.get('signal_type')) != signal_type:
+                continue
+            judgment = sig.get('judgment', 'IGNORE')
+            engine.add_signal(self._prepare_signal_for_replay(sig), judgment)
+        return engine
+
     def clear_signals(self):
         """Clear the stored signal pool while preserving computed thresholds.
 
@@ -616,6 +642,31 @@ class HybridCalibrationEngine:
     def total_signals(self) -> int:
         return self.good_count + self.bad_count
 
+    def get_counts_by_type(self) -> dict:
+        """Return GOOD/BAD/TOTAL counts separated by FRF and PSD."""
+        counts = {
+            'frf': {'GOOD': 0, 'BAD': 0, 'TOTAL': 0},
+            'psd': {'GOOD': 0, 'BAD': 0, 'TOTAL': 0},
+        }
+        for sig in self._all_signals:
+            signal_type = self._normalise_signal_type(sig.get('signal_type'))
+            judgment = sig.get('judgment')
+            if judgment in ('GOOD', 'BAD'):
+                counts[signal_type][judgment] += 1
+                counts[signal_type]['TOTAL'] += 1
+        return counts
+
+    def meets_minimum_for_type(self, signal_type: str) -> bool:
+        counts = self.get_counts_by_type().get(
+            self._normalise_signal_type(signal_type),
+            {'GOOD': 0, 'BAD': 0},
+        )
+        return counts['GOOD'] >= 3 and counts['BAD'] >= 3
+
+    @property
+    def meets_minimum_any_type(self) -> bool:
+        return any(self.meets_minimum_for_type(st) for st in ('frf', 'psd'))
+
     @property
     def meets_minimum(self) -> bool:
         return self.good_count >= 3 and self.bad_count >= 3
@@ -624,12 +675,37 @@ class HybridCalibrationEngine:
     def can_estimate(self) -> bool:
         return self.meets_minimum
 
+    def can_estimate_type(self, signal_type: str) -> bool:
+        return self.meets_minimum_for_type(signal_type)
+
+    @property
+    def can_estimate_any_type(self) -> bool:
+        return self.meets_minimum_any_type
+
     @property
     def confidence_level(self) -> int:
         """0-4 confidence scale."""
         if not self.meets_minimum:
             return 0
         n = self.total_signals
+        if n <= 7:
+            return 1
+        elif n <= 11:
+            return 2
+        elif n <= 15:
+            return 3
+        else:
+            return 4
+
+    def confidence_level_for_type(self, signal_type: str) -> int:
+        """0-4 confidence scale for one signal family."""
+        counts = self.get_counts_by_type().get(
+            self._normalise_signal_type(signal_type),
+            {'GOOD': 0, 'BAD': 0, 'TOTAL': 0},
+        )
+        if counts['GOOD'] < 3 or counts['BAD'] < 3:
+            return 0
+        n = counts['TOTAL']
         if n <= 7:
             return 1
         elif n <= 11:
@@ -663,6 +739,22 @@ class HybridCalibrationEngine:
         bayes = self.bayesian.estimate()
         roc = self.roc.estimate()
         return self._merge_all(perc, bayes, roc, level)
+
+    def get_estimates_for_type(self, signal_type: str) -> Optional[dict]:
+        """Return calibrated estimates using only FRF or PSD signals."""
+        signal_type = self._normalise_signal_type(signal_type)
+        if not self.can_estimate_type(signal_type):
+            return None
+        return self._filtered_engine(signal_type).get_estimates()
+
+    def get_estimates_by_type(self) -> dict:
+        """Return available FRF/PSD-specific estimates."""
+        estimates = {}
+        for signal_type in ('frf', 'psd'):
+            typed = self.get_estimates_for_type(signal_type)
+            if typed:
+                estimates[signal_type] = typed
+        return estimates
 
     def _merge_two(self, perc: Dict[str, Any], bayes: Dict[str, Any], bayes_weight: float = 0.6) -> Dict[str, Any]:
         """Weighted average of Percentile and Bayesian estimates."""
@@ -927,6 +1019,10 @@ class HybridCalibrationEngine:
             'confidence_level': self.confidence_level,
             'total_signals': self.total_signals,
             'signals': self._all_signals,
+            'estimates_by_type': {
+                st: {k: float(v) for k, v in vals.items() if v is not None}
+                for st, vals in self.get_estimates_by_type().items()
+            },
             'method': 'hybrid',
             'created_at': (self._all_signals[0]['timestamp']
                           if self._all_signals else ''),
@@ -941,11 +1037,7 @@ class HybridCalibrationEngine:
         signals = data.get('signals', [])
         for sig in signals:
             judgment = sig.get('judgment', 'IGNORE')
-            sig_copy = dict(sig)
-            for key in ('fft_freqs', 'fft_mags', 'residual_physical', 'signal_physical'):
-                if key in sig_copy and isinstance(sig_copy[key], list):
-                    sig_copy[key] = np.array(sig_copy[key])
-            engine.add_signal(sig_copy, judgment)
+            engine.add_signal(cls._prepare_signal_for_replay(sig), judgment)
         return engine
 
 # ---------------------------------------------------------------------------

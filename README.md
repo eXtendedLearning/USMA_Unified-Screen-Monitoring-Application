@@ -1,4 +1,4 @@
-# USMA (Unified Screen Monitoring Application) — v0.12.3
+# USMA (Unified Screen Monitoring Application) — v0.12.4
 
 Real-time screen monitoring, FRF signal reconstruction, OCR-based metadata extraction, and UNV Dataset 58 export for modal analysis workflows. Fully portable — no installation required.
 
@@ -103,9 +103,12 @@ an initial calibration phase.
 ### How It Works
 
 1. **Start calibration:** When loading a config, choose "Calibrate with Expert Feedback"
-2. **Classify signals:** As hits are detected, click Good, Bad, or Skip for each one
-3. **Automatic threshold computation:** After 6+ signals (3 Good + 3 Bad minimum),
-   the system computes optimised thresholds using a hybrid statistical approach
+2. **Classify signals:** As hits are detected, click Good, Bad, or Skip for both
+   FRF+PSD together, or use the FRF/PSD-specific buttons when only one signal
+   family should be labelled
+3. **Automatic threshold computation:** After 6+ signals (3 Good + 3 Bad minimum)
+   for a signal family, the system computes optimised thresholds using a hybrid
+   statistical approach
 4. **Finish & monitor:** Click "Finish Calibration" to switch to normal monitoring
    with your calibrated parameters
 
@@ -136,7 +139,8 @@ The calibration status bar shows your current confidence level:
 
 ### Parameters Tuned
 
-The calibration system optimises these parameters for both FRF and PSD analysis:
+The calibration system optimises these parameters independently for FRF and PSD
+analysis when each family has enough labelled examples:
 
 - **FFT cutoff frequency** — boundary between low and high frequency energy
 - **FFT energy ratio threshold** — maximum acceptable high-frequency energy proportion
@@ -179,7 +183,7 @@ This means:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
-**Current version:** v0.12.3 — Calibration diagnostics persistence, overlay geometry, and view scaling
+**Current version:** v0.12.4 — FRF/PSD-specific calibration judgments and thresholds
 
 ---
 

@@ -95,6 +95,7 @@ def clear_folder(config_path: str) -> bool:
 
 def _save_metadata(folder: str, config_path: str, engine: "HybridCalibrationEngine"):
     estimates = engine.get_estimates() if engine.can_estimate else {}
+    estimates_by_type = engine.get_estimates_by_type()
     meta = {
         "config_path": config_path,
         "saved_at": datetime.now().isoformat(),
@@ -104,6 +105,10 @@ def _save_metadata(folder: str, config_path: str, engine: "HybridCalibrationEngi
         "confidence_level": engine.confidence_level,
         "estimates": {k: round(float(v), 8) for k, v in (estimates or {}).items()
                       if v is not None},
+        "estimates_by_type": {
+            st: {k: round(float(v), 8) for k, v in vals.items() if v is not None}
+            for st, vals in estimates_by_type.items()
+        },
     }
     path = os.path.join(folder, "metadata.json")
     with open(path, "w", encoding="utf-8") as f:
