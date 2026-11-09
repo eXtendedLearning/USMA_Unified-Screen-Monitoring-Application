@@ -31,11 +31,14 @@ signal_logs/
 # Cal. Diagnostics window or the auto-save on calibration finish to populate.
 calibration_data/
 
-# READMEs and stuff
+# Scratch notes (not part of the project record)
 UPDATE.md
 DAILY.md
-TASKS.md
-THEORY.md
+
+# NOTE (2026-09 audit, finding D-1): THEORY.md and TASKS.md were previously
+# listed here.  THEORY.md is the canonical scientific reference cited by the
+# conference/journal work and must be version-controlled; TASKS.md is the
+# review-status record.  Both are now tracked.
 
 # Temporary Files
 *.tmp

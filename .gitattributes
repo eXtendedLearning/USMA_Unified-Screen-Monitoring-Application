@@ -1,0 +1,28 @@
+# Normalise line endings.  Before the 2026-09 audit the repository had no
+# .gitattributes and source files carried MIXED CRLF/LF terminators, so every
+# file showed as fully rewritten in `git diff` and review was impossible
+# (docs/AUDIT_2026-09.md finding D-2).
+#
+# After adding this file, renormalise ONCE, deliberately, on a clean branch:
+#     git add --renormalize .
+#     git commit -m "Normalise line endings via .gitattributes"
+
+* text=auto eol=lf
+
+# Windows launchers must keep CRLF or cmd.exe mis-parses them.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Explicit text types
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+*.unv   text eol=lf
+
+# Binary
+*.png   binary
+*.jpg   binary
+*.docx  binary
+*.pdf   binary
+*.whl   binary

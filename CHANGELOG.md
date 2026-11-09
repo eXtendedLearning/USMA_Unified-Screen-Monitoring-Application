@@ -4,6 +4,90 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## Unreleased — September 2026 audit fixes
+
+Full findings, evidence and reproduction scripts: `docs/AUDIT_2026-09.md`.
+Not yet released; `APP_VERSION` is unchanged at 0.12.4.
+
+**Blockers fixed**
+
+- **NumPy 2.0 incompatibility (C-1).** `usma/models.py` called `np.trapz`, removed in
+  NumPy 2.0; the bundled portable runtime is NumPy 2.2.6. Every Level 3/4 calibration
+  with ≥ 5 GOOD *and* ≥ 5 BAD signals raised `AttributeError` out of `get_estimates()`,
+  so `ROCYoudenEstimator` had never executed in the shipped environment and the Cal.
+  Diagnostics ROC subplot had never rendered. `usma/analysis/coherence.py` meanwhile
+  used `np.trapezoid`, which requires NumPy ≥ 2.0 — no NumPy version could run both.
+  Both now use a single `usma.models.trapezoid()` helper. `requirements.txt` pinned.
+- **Calibration lowpass sweep filtered the residual (C-2).** The GUI shipped
+  `residual_physical` under the dict key `signal_vector`, and
+  `_sweep_filter_params` re-filtered that array — computing the residual *of the
+  residual*. Every `lowpass_cutoff` ever produced by calibration was invalid.
+  `LightweightHitData` gains `signal_pixels`, populated from the pixel-space signal at
+  both the FRF and PSD hit-record sites; the sweep reads it, falling back to
+  `signal_physical` (an exact substitute, since the exceedance ratio is
+  scale-invariant, so legacy sessions replay correctly).
+- **Bayesian estimate of `relative_residual_ratio` was fabricated (C-4).** The GUI fed
+  the estimator the *current config value* for every signal, identical for GOOD and
+  BAD, so the posterior — and the 95 % credible interval displayed beside it — was a
+  function of the GOOD/BAD count imbalance alone and never of the data. At Level 2 it
+  carried 60 % of the merge weight. Removed from `PARAM_GRIDS`; the parameter is now
+  estimated by the percentile and ROC sweeps, which use genuine per-signal residuals.
+- **Filter failures were reported as GOOD hits (C-5).** `sosfiltfilt` needs
+  `len > 3·(2·n_sections+1)−1` — 27 samples at the default order 7 — but the guard only
+  rejected signals under 15 samples, and the resulting exception was swallowed into
+  `filtered = detrended`, giving an identically-zero residual, `exceedance_ratio = 0`
+  and a clean verdict, with nothing logged. New `_lowpass_detrended()` reduces the
+  Butterworth order until the signal fits, logs any reduction, and sets the new
+  `FRFAnalysisResult.lowpass_valid = False` when no order works. The dead
+  `_apply_lowpass_filter()` (which also read FRF settings for PSD ROIs) was removed.
+
+**Correctness**
+
+- The lowpass-cutoff sweep no longer hardcodes `butter(7, …)` and a `0.10` test ratio;
+  it uses each signal's recorded `lowpass_filter_order` and `relative_residual_ratio`
+  (C-3). A `from scipy.signal import sosfiltfilt` inside the inner loop was hoisted.
+- `get_threshold_history()` now reuses `_prepare_signal_for_replay()` instead of a
+  divergent, shorter list of array keys.
+
+**Documentation**
+
+- `THEORY.md` corrected: the FFT and Butterworth cutoffs use **different**
+  normalisations (`[0, 0.5]` cycles/pixel vs `Wn` where 1.0 = Nyquist), so the two
+  `0.07` defaults are a factor of 2 apart — §2.2 had claimed they were the same; the
+  LP-order attenuation table was 2× too large in dB (−72/−120/−168/−216 → −37/−61/−86/
+  −110); "7 % of Nyquist" is 14 %; §2.2's self-contradictory account of the exceedance
+  ratio was rewritten around its scale-invariance; §2.4's unmeasured claim that the
+  max-based threshold separates better was replaced with the measured AUCs; the unused
+  `y_scale_type` field documented as a trap; stale method names fixed; new §8.1
+  compares every default against the real recorded data.
+- `README.md` corrected: the classification table gave the single-family rule as if it
+  were general; the confidence labels "Solid — cross-validated" and "Robust — high
+  confidence" overstated a sample count and contradicted `THEORY.md` §5.6; the merge is
+  a trimmed mean of three estimates, not cross-validation. Accuracy caveat added.
+- `AGENTS.md` added (no agent/context instructions existed in the repository).
+- `.gitignore` no longer excludes `THEORY.md` and `TASKS.md` — the canonical
+  mathematical reference cited in publications was untracked.
+- `.gitattributes` added. Source files carried **mixed CRLF/LF within single files**,
+  so `git diff` reported all 18 tracked files as fully rewritten (6458/6458) with no
+  semantic change. Adding `.gitattributes` fixed this outright — the diff dropped to
+  real changes only. Verified against a scratch index that no `git add --renormalize`
+  commit is needed: the index already held LF throughout, so only the comparison was
+  broken.
+
+**Known, documented, not changed**
+
+- Neither the FFT nor the LP discriminant shows demonstrated separation on USMA's own
+  labelled data (AUC 0.37–0.69, n ≤ 17, one value inverted). This is the premise of
+  `docs/SPEC_CLASSIFICATION_V2.md`; the audit supplies the numbers.
+- The default thresholds are mis-scaled in opposite directions — FFT fires on ~every
+  hit, LP on ~none — but no defensible global constant exists, so they are documented
+  rather than changed (`THEORY.md` §8.1).
+- The FFT uses mean removal and no window, so a clean trace sits at 93 % of the default
+  threshold on spectral leakage alone. Changing this invalidates every stored
+  calibration and belongs with the V2 spec.
+
+---
+
 ## v0.12.4 — FRF/PSD-Specific Calibration *(current)*
 
 - **Runtime version aligned to v0.12.4** — `APP_VERSION` now reports 0.12.4 across the package and portable launcher.

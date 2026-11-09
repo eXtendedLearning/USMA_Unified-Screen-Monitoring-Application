@@ -599,6 +599,9 @@ class ScreenMonitor:
                     signal_type="frf",
                     max_abs_residual=frf_result.max_abs_residual,
                     dynamic_threshold=frf_result.dynamic_threshold,
+                    # Pixel-space signal, needed by the calibration LP sweep.
+                    signal_pixels=(np.copy(frf_result.signal_vector)
+                                   if frf_result.signal_vector is not None else None),
                 )
                 try:
                     self.event_queue.put_nowait(MonitorEvent(
@@ -650,6 +653,9 @@ class ScreenMonitor:
                     signal_type="psd",
                     max_abs_residual=psd_result.max_abs_residual,
                     dynamic_threshold=psd_result.dynamic_threshold,
+                    # Pixel-space signal, needed by the calibration LP sweep.
+                    signal_pixels=(np.copy(psd_result.signal_vector)
+                                   if psd_result.signal_vector is not None else None),
                 )
                 try:
                     self.event_queue.put_nowait(MonitorEvent(

@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import cv2
 
-from usma.models import MonitoringRegion, CoherenceAnalysisResult
+from usma.models import MonitoringRegion, CoherenceAnalysisResult, trapezoid
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class CoherenceAnalyzer:
 
             # Badness = area under (1 - gamma^2) / span
             freq_span = max(region.x_axis_max - region.x_axis_min, 1.0)
-            badness_integral = float(np.trapezoid(inverted_signal, freq_axis))
+            badness_integral = float(trapezoid(inverted_signal, freq_axis))
             normalized_badness = badness_integral / freq_span
 
             # Per-band (4 bands) badness
@@ -73,7 +73,7 @@ class CoherenceAnalyzer:
                 end_i = (i + 1) * band_size if i < 3 else n
                 band_inv = inverted_signal[start_i:end_i]
                 band_freq = freq_axis[start_i:end_i]
-                band_badness.append(float(np.trapezoid(band_inv, band_freq)) / max(band_freq[-1] - band_freq[0], 1.0))
+                band_badness.append(float(trapezoid(band_inv, band_freq)) / max(band_freq[-1] - band_freq[0], 1.0))
 
             return CoherenceAnalysisResult(
                 signal_physical=signal_physical,

@@ -1044,12 +1044,24 @@ class MonitorControlGUI:
             'total_energy': sig.total_energy,
             'high_freq_energy': sig.high_freq_energy,
             'max_abs_residual': sig.max_abs_residual,
+            # Provenance only: the ratio configured when this signal was captured.
+            # It is NOT a per-signal observation and is no longer fed to the
+            # Bayesian estimator (docs/AUDIT_2026-09.md finding C-4).  The
+            # percentile/ROC sweeps use it to re-filter under the same settings.
             'relative_residual_ratio': (
                 self.monitor.app_config.psd_relative_residual_ratio
                 if self._cal_signal_type(sig) == 'psd'
                 else self.monitor.app_config.relative_residual_ratio
             ),
-            'signal_vector': sig.residual_physical,
+            'lowpass_filter_order': (
+                self.monitor.app_config.psd_lowpass_filter_order
+                if self._cal_signal_type(sig) == 'psd'
+                else self.monitor.app_config.lowpass_filter_order
+            ),
+            # The pixel-space SIGNAL.  This key previously held the RESIDUAL under
+            # the name 'signal_vector', which made the calibration lowpass-cutoff
+            # sweep filter an already high-passed array (finding C-2).
+            'signal_pixels': sig.signal_pixels,
             'roi_name': sig.hit_key,
             'signal_type': self._cal_signal_type(sig),
             'source': source,

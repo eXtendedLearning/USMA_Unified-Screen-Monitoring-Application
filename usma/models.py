@@ -7,9 +7,30 @@ from datetime import datetime
 import numpy as np
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, List, Tuple, Any, get_type_hints
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, sosfiltfilt
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# NumPy compatibility
+# ---------------------------------------------------------------------------
+# ``np.trapz`` was REMOVED in NumPy 2.0 and replaced by ``np.trapezoid``.
+# ``np.trapezoid`` does not exist before NumPy 2.0.  The project previously
+# used ``np.trapz`` here and ``np.trapezoid`` in usma/analysis/coherence.py,
+# so no single NumPy version could run both paths.  See docs/AUDIT_2026-09.md
+# finding C-1.  This helper resolves the name once, at import time.
+try:                                   # NumPy >= 2.0
+    _trapezoid = np.trapezoid
+except AttributeError:                 # NumPy < 2.0
+    _trapezoid = np.trapz
+
+
+def trapezoid(y, x=None, **kwargs):
+    """Trapezoidal integration that works on both NumPy 1.x and 2.x."""
+    if x is None:
+        return _trapezoid(y, **kwargs)
+    return _trapezoid(y, x, **kwargs)
 
 # --- Version Configuration ---
 APP_VERSION = "0.12.4"
@@ -102,6 +123,10 @@ class FRFAnalysisResult:
     max_abs_residual: float = 0.0
     dynamic_threshold: float = 0.0
     y_axis_unit: str = "g/N"
+    # False when the Butterworth filter could not be applied at all, so the
+    # residual is identically zero and the LP verdict is meaningless rather than
+    # clean.  See docs/AUDIT_2026-09.md finding C-5.
+    lowpass_valid: bool = True
 
 @dataclass(slots=True)
 class LightweightHitData:
@@ -126,6 +151,10 @@ class LightweightHitData:
     signal_type: str = "frf"  # "frf", "psd", or "coherence"
     max_abs_residual: float = 0.0
     dynamic_threshold: float = 0.0
+    # Pixel-space reconstructed signal (FRFAnalysisResult.signal_vector).
+    # Required by the calibration lowpass-cutoff sweep, which must re-filter the
+    # SIGNAL, not the residual.  See docs/AUDIT_2026-09.md finding C-2.
+    signal_pixels: Optional[np.ndarray] = None
 
 # ---------------------------------------------------------------------------
 # NEW v0.6.0 DATACLASSES
@@ -311,22 +340,35 @@ class PercentileBoundaryEstimator:
         for lp_cut in np.arange(0.03, 0.20, 0.01):
             exc_ratios = []
             for sig in all_signals:
-                # Prefer pixel-space signal; fall back to physical
-                signal = sig.get('signal_vector', sig.get('signal_physical'))
+                # The sweep must re-filter the reconstructed SIGNAL.  Before the
+                # 2026-09 audit this read 'signal_vector', which the GUI populated
+                # with the RESIDUAL, so the sweep filtered an already high-passed
+                # array (finding C-2).  'signal_physical' is an affine image of the
+                # pixel signal and the exceedance ratio is scale-invariant, so it is
+                # an exact fallback for legacy stored sessions.
+                signal = sig.get('signal_pixels')
+                if signal is None:
+                    signal = sig.get('signal_physical')
                 if signal is None or len(signal) < 15:
                     exc_ratios.append(0.0)
                     continue
+                # Use the ratio and order that actually produced this signal rather
+                # than hardcoded constants, so the cutoff is optimised under the
+                # same LP configuration the runtime will use (finding C-3).
+                ratio = float(sig.get('relative_residual_ratio') or 0.10)
+                order = int(sig.get('lowpass_filter_order') or 7)
                 try:
                     detrended = signal - np.mean(signal)
-                    sos = butter(7, min(lp_cut, 0.99), btype='low', output='sos')
-                    from scipy.signal import sosfiltfilt as _sosfiltfilt
-                    filtered = _sosfiltfilt(sos, detrended)
+                    sos = butter(order, min(lp_cut, 0.99), btype='low', output='sos')
+                    filtered = sosfiltfilt(sos, detrended)
                     residual = detrended - filtered
                     max_abs = np.max(np.abs(residual))
-                    test_thr = 0.10 * max_abs if max_abs > 1e-9 else 0.0
+                    test_thr = ratio * max_abs if max_abs > 1e-9 else 0.0
                     exc = np.sum(np.abs(residual) > test_thr) / len(residual)
                     exc_ratios.append(exc)
-                except Exception:
+                except Exception as exc_err:
+                    logger.debug(f"[CAL] LP sweep skipped a signal at cutoff "
+                                 f"{lp_cut:.3f}: {exc_err}")
                     exc_ratios.append(0.0)
 
             exc_ratios = np.array(exc_ratios)
@@ -354,10 +396,17 @@ class BayesianThresholdEstimator:
     Also computes 95% credible interval for confidence display.
     """
 
+    # NOTE (2026-09 audit, finding C-4): ``relative_residual_ratio`` was removed
+    # from this grid.  The GUI fed this estimator the CURRENT CONFIG VALUE of
+    # that parameter for every signal, identical for GOOD and BAD alike, so the
+    # posterior was driven purely by the GOOD/BAD count imbalance and carried no
+    # information from the data.  A Bayesian update needs a per-signal OBSERVED
+    # metric; none exists for this parameter.  It is therefore estimated by the
+    # percentile sweep and the ROC sweep only, both of which recompute the
+    # exceedance ratio per candidate ratio from each signal's own residual.
     PARAM_GRIDS = {
         'fft_energy_ratio_threshold': (0.0005, 0.15, 300),
         'exceedance_ratio_threshold': (0.05, 0.99, 300),
-        'relative_residual_ratio': (0.02, 0.50, 300),
     }
 
     def __init__(self):
@@ -375,10 +424,10 @@ class BayesianThresholdEstimator:
 
         self._signal_count += 1
 
+        # Only parameters with a genuine per-signal observed metric belong here.
         metric_map = {
             'fft_energy_ratio_threshold': signal_data.get('energy_ratio'),
             'exceedance_ratio_threshold': signal_data.get('exceedance_ratio'),
-            'relative_residual_ratio': signal_data.get('relative_residual_ratio'),
         }
 
         for param_name, grid in self.grids.items():
@@ -554,7 +603,7 @@ class ROCYoudenEstimator:
         if len(roc_points) >= 2:
             fprs = [p[0] for p in roc_points]
             tprs = [p[1] for p in roc_points]
-            auc = float(np.trapz(tprs, fprs))
+            auc = float(trapezoid(tprs, fprs))
             auc = max(0.0, min(1.0, abs(auc)))
         else:
             auc = 0.5
@@ -586,7 +635,7 @@ class HybridCalibrationEngine:
         """Return a copy with persisted lists restored to ndarray values."""
         sig_copy = dict(signal_data)
         for key in ('fft_freqs', 'fft_mags', 'residual_physical',
-                    'signal_physical', 'signal_vector'):
+                    'signal_physical', 'signal_pixels', 'signal_vector'):
             if key in sig_copy and isinstance(sig_copy[key], list):
                 sig_copy[key] = np.array(sig_copy[key])
         return sig_copy
@@ -916,7 +965,7 @@ class HybridCalibrationEngine:
             pts = sorted(zip(fprs, tprs))
             fprs_sorted = [p[0] for p in pts]
             tprs_sorted = [p[1] for p in pts]
-            auc = float(np.trapz(tprs_sorted, fprs_sorted))
+            auc = float(trapezoid(tprs_sorted, fprs_sorted))
             auc = max(0.0, min(1.0, abs(auc)))
             # Find optimal point
             opt_tp = sum(1 for v in good_vals if v <= best_thr) / n_good if n_good else 0
@@ -951,10 +1000,7 @@ class HybridCalibrationEngine:
         }
         for sig in self._all_signals:
             judgment = sig.get('judgment', 'IGNORE')
-            sig_copy = dict(sig)
-            for key in ('fft_freqs', 'fft_mags', 'residual_physical', 'signal_physical'):
-                if key in sig_copy and isinstance(sig_copy[key], list):
-                    sig_copy[key] = np.array(sig_copy[key])
+            sig_copy = self._prepare_signal_for_replay(sig)
             temp.add_signal(sig_copy, judgment)
             if temp.can_estimate:
                 est = temp.get_estimates()

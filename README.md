@@ -69,14 +69,25 @@ USMA/
 
 ## Classification System
 
-Dual-method classification (FRF / PSD):
+Dual-method classification (FRF / PSD). Four votes are cast per hit — FRF-FFT, FRF-LP, PSD-FFT,
+PSD-LP — and combined as follows (authoritative description: `THEORY.md` §4):
 
-| FFT | Lowpass | Result | Color |
-|-----|---------|--------|-------|
-| OK | OK | **GOOD HIT** | Green |
-| BAD | OK | **SUSPECT (FFT only)** | Orange |
-| OK | BAD | **SUSPECT (Lowpass only)** | Orange |
-| BAD | BAD | **BAD HIT** | Red |
+| Condition | Result | Color |
+|-----------|--------|-------|
+| No enabled method voted BAD | **GOOD HIT** | Green |
+| Some methods voted BAD | **SUSPECT (...)** | Orange |
+| Both the FRF side *and* the PSD side have ≥ 1 BAD vote — or, when only one side exists, both of its methods voted BAD | **BAD HIT (...)** | Red |
+
+The parenthetical lists every failing method, e.g. `BAD HIT (FRF-FFT+PSD-LP)`.
+
+> The table in earlier READMEs showed `BAD = FFT bad AND LP bad`. That is only correct when a single
+> signal family is configured; with both FRF and PSD present, one BAD vote on each side is
+> sufficient. Corrected in the 2026-09 audit.
+
+> **Accuracy caveat.** Both methods are retained from v0.7.0 and neither has demonstrated
+> separation between GOOD and BAD on USMA's own labelled data (measured AUC 0.37–0.69, n ≤ 17; see
+> `THEORY.md` §2.2 and `docs/AUDIT_2026-09.md`). `docs/SPEC_CLASSIFICATION_V2.md` proposes
+> replacements. Treat current verdicts as advisory.
 
 ---
 
@@ -122,8 +133,11 @@ progressively as more data is collected:
   of the Good distribution when distributions overlap
 - **Level 2 (8-11 signals):** Adds Bayesian grid-based posterior estimation with
   sigmoid likelihoods, providing credible intervals for each parameter
-- **Level 3+ (12+ signals):** Adds ROC/Youden J-statistic optimisation and
-  cross-validates across all three methods, dropping outlier estimates
+- **Level 3+ (12+ signals):** Adds ROC/Youden J-statistic optimisation. The three
+  estimates are then combined by a trimmed mean: if they agree within 15–20 % they
+  are averaged, otherwise the most deviant one is dropped and the other two are
+  averaged. This is estimator *agreement*, **not** cross-validation — there is no
+  held-out data and no generalisation estimate. (Wording corrected 2026-09.)
 
 ### Confidence Scale
 
@@ -132,10 +146,18 @@ The calibration status bar shows your current confidence level:
 | Level | Color | Signals | Meaning |
 |-------|-------|---------|---------|
 | 0 | Red | <6 | Not calibrated — using defaults |
-| 1 | Orange | 6-7 | Preliminary — rough estimates |
-| 2 | Yellow | 8-11 | Basic — Bayesian converging |
-| 3 | Blue | 12-15 | Solid — cross-validated |
-| 4 | Green | 16+ | Robust — high confidence |
+| 1 | Orange | 6-7 | Percentile estimator only |
+| 2 | Yellow | 8-11 | Percentile + Bayesian |
+| 3 | Blue | 12-15 | All three estimators, 20 % agreement tolerance |
+| 4 | Green | 16+ | All three estimators, 15 % agreement tolerance |
+
+> **The confidence level counts labelled samples. It is ordinal, not statistical.** It does not
+> test whether the GOOD and BAD populations are distinguishable, and it will report Level 4 for a
+> metric that is constant across every signal (this has happened: see `THEORY.md` §8.1). A high
+> level means "enough samples to run the strictest merge rule", never "the thresholds are correct".
+> Read the AUC values on the Cal. Diagnostics ROC subplot for that. (Wording corrected 2026-09;
+> the previous labels "Solid — cross-validated" and "Robust — high confidence" overstated what is
+> computed, and contradicted `THEORY.md` §5.6.)
 
 ### Parameters Tuned
 

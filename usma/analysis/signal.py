@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 import cv2
-from scipy.signal import butter, filtfilt, sosfiltfilt
+from scipy.signal import butter, sosfiltfilt
 from scipy.fft import rfft, rfftfreq
 
 from usma.models import (
@@ -39,20 +39,42 @@ class SignalAnalyzer:
             return False
         return True
 
-    def _apply_lowpass_filter(self, signal: np.ndarray) -> np.ndarray:
-        if len(signal) < 15:
-            return signal.copy()
+    @staticmethod
+    def _lowpass_detrended(detrended: np.ndarray, cutoff: float, order: int):
+        """Zero-phase Butterworth lowpass with a length-aware order.
 
-        cutoff = min(self.app_config.lowpass_cutoff, 0.99)
-        order = self.app_config.lowpass_filter_order
+        ``sosfiltfilt`` requires ``len(signal) > 3 * (2 * n_sections + 1) - 1``.
+        The previous guard only rejected signals shorter than 15 samples, so at
+        the default order 7 any ROI 15-26 px wide raised inside the filter, the
+        exception was swallowed, the residual became identically zero and the hit
+        was reported GOOD with no warning (docs/AUDIT_2026-09.md finding C-5).
 
-        try:
-            sos = butter(order, cutoff, btype='low', output='sos')
-            filtered = sosfiltfilt(sos, signal)
-            return filtered
-        except Exception as e:
-            logger.warning(f"Lowpass filter failed: {e}. Returning original signal.")
-            return signal.copy()
+        Returns ``(filtered, effective_order)``.  ``effective_order`` is None when
+        no filter could be applied, which the caller must treat as "the lowpass
+        method could not evaluate this signal", not as a pass.
+        """
+        n = len(detrended)
+        cutoff = min(max(float(cutoff), 1e-6), 0.99)
+        for candidate in range(int(order), 0, -1):
+            try:
+                sos = butter(candidate, cutoff, btype='low', output='sos')
+            except Exception as e:
+                logger.warning(f"Butterworth design failed at order {candidate}: {e}")
+                continue
+            padlen = 3 * (2 * len(sos) + 1) - 1
+            if n <= padlen:
+                continue
+            try:
+                return sosfiltfilt(sos, detrended), candidate
+            except Exception as e:
+                logger.warning(f"Lowpass filter failed at order {candidate}: {e}")
+                continue
+        logger.warning(
+            f"Lowpass method unavailable: signal of {n} samples is too short for "
+            f"any Butterworth order at cutoff {cutoff:.4f}. The LP vote is skipped "
+            f"for this signal instead of defaulting to GOOD."
+        )
+        return None, None
 
     def _calculate_exceedances(self, residual: np.ndarray, threshold: float) -> Tuple[int, float]:
         exceedance_mask = np.abs(residual) > threshold
@@ -187,15 +209,17 @@ class SignalAnalyzer:
         pixel_mean = np.mean(signal_pixels)
         pixel_detrended = signal_pixels - pixel_mean
 
-        if len(pixel_detrended) < 15:
+        filtered_detrended, effective_order = self._lowpass_detrended(
+            pixel_detrended, lp_cutoff, lp_order
+        )
+        lowpass_valid = filtered_detrended is not None
+        if not lowpass_valid:
             filtered_detrended = pixel_detrended.copy()
-        else:
-            try:
-                sos = butter(lp_order, min(lp_cutoff, 0.99), btype="low", output="sos")
-                filtered_detrended = sosfiltfilt(sos, pixel_detrended)
-            except Exception as e:
-                logger.warning(f"Lowpass filter failed: {e}. Returning original signal.")
-                filtered_detrended = pixel_detrended.copy()
+        elif effective_order != lp_order:
+            logger.info(
+                f"Lowpass order reduced {lp_order} -> {effective_order} for a "
+                f"{len(pixel_detrended)}-sample signal (sosfiltfilt padding limit)."
+            )
 
         residual_pixels = pixel_detrended - filtered_detrended
         filtered_pixels = filtered_detrended + pixel_mean
@@ -207,7 +231,10 @@ class SignalAnalyzer:
         exceedance_count, exceedance_ratio = self._calculate_exceedances(
             residual_pixels, dynamic_threshold
         )
-        lowpass_is_bad = exceedance_ratio > exc_threshold
+        # A signal the filter could not process yields an identically-zero
+        # residual.  Do not let that masquerade as a clean hit: flag it so the
+        # caller can tell "LP says clean" apart from "LP could not evaluate".
+        lowpass_is_bad = bool(exceedance_ratio > exc_threshold) if lowpass_valid else False
 
         # NOTE: filtered_physical and residual_physical now contain pixel-space data
         # despite the field names. A rename is planned for a future refactor.
@@ -230,6 +257,7 @@ class SignalAnalyzer:
             max_abs_residual=max_abs_residual,
             dynamic_threshold=dynamic_threshold,
             y_axis_unit=region.y_axis_unit,
+            lowpass_valid=lowpass_valid,
         )
 
 

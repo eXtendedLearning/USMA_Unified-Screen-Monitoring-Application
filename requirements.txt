@@ -1,9 +1,19 @@
-opencv-python
-numpy
-pyautogui
-matplotlib
-Pillow
-scipy
-sounddevice
-mss
-pytesseract
+# Versions below are the floors the code is written against, and match the
+# portable runtime bundled in python/ (Python 3.11.9), which is the only
+# configuration USMA is tested on.
+#
+# numpy: usma/models.py and usma/analysis/coherence.py both integrate with the
+# trapezoidal rule.  `np.trapz` was REMOVED in NumPy 2.0 and replaced by
+# `np.trapezoid`.  The code now resolves the name once via
+# `usma.models.trapezoid`, so both major versions work — but leaving numpy
+# unpinned was what allowed the 2.x/1.x split to go unnoticed until the
+# 2026-09 audit (finding C-1).  Pin a floor deliberately.
+numpy>=1.22,<3        # bundled: 2.2.6
+scipy>=1.10           # bundled: 1.16.3  (sosfiltfilt, butter)
+opencv-python>=4.8    # bundled: 4.12.0.88
+matplotlib>=3.7       # bundled: 3.10.7
+Pillow>=10.0          # bundled: 12.0.0
+mss>=9.0              # screen capture
+pyautogui>=0.9.54     # capture fallback only
+pytesseract>=0.3.10   # bundled: 0.3.13 (requires external/tesseract/)
+sounddevice>=0.4.6    # bundled: 0.5.3 (optional: audio feedback)
